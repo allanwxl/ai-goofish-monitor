@@ -51,4 +51,12 @@ def test_save_to_jsonl(tmp_path, monkeypatch):
             sort_order="asc",
         )
     )
-    assert records == [record]
+    # 结果落库时会附加黑名单/隐藏功能的状态位字段。
+    expected = {
+        **record,
+        "_status": "active",
+        "_matched_blacklist_keywords": [],
+        "_hidden_reason": None,
+        "_effective_hidden": False,
+    }
+    assert records == [expected]

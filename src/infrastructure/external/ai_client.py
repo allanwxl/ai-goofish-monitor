@@ -21,6 +21,7 @@ from src.services.ai_request_compat import (
     RESPONSES_API_MODE,
     build_ai_request_params,
     create_ai_response_async,
+    detect_response_truncation,
     is_chat_completions_api_unsupported_error,
     is_json_output_unsupported_error,
     is_responses_api_unsupported_error,
@@ -28,10 +29,16 @@ from src.services.ai_request_compat import (
     remove_temperature_param,
 )
 from src.services.ai_response_parser import (
+    AIResponseTruncatedError,
     EmptyAIResponseError,
     extract_ai_response_content,
     parse_ai_response_json,
 )
+
+
+# 推理模型的推理 token 与最终答案共享同一个 max_tokens 预算，预算过小会导致
+# content 被挤空（finish_reason=length）。默认给足预算。
+DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
 
 def _normalize_no_proxy_host(part: str) -> str:
@@ -199,7 +206,7 @@ class AIClient:
         messages: List[Dict],
         *,
         temperature: float = 0.1,
-        max_output_tokens: int = 4000,
+        max_output_tokens: Optional[int] = None,
         enable_json_output: Optional[bool] = None,
     ) -> str:
         """调用 AI API"""
@@ -211,6 +218,12 @@ class AIClient:
         )
         use_temperature = True
         max_attempts = 4
+        # 显式传值优先；否则取配置中的输出预算（推理模型需要较大预算）。
+        if max_output_tokens is None:
+            max_output_tokens = (
+                getattr(self.settings, "max_output_tokens", None)
+                or DEFAULT_MAX_OUTPUT_TOKENS
+            )
 
         for attempt in range(max_attempts):
             request_params = build_ai_request_params(
@@ -233,7 +246,29 @@ class AIClient:
                     api_mode,
                     request_params,
                 )
+
+                # 截断时 content 会被挤空，必须在提取内容之前判断，否则会回退到
+                # reasoning_content，把"输出被截断"伪装成"JSON 解析失败"。
+                truncated, truncation_reason = detect_response_truncation(response)
+                if truncated:
+                    raise AIResponseTruncatedError(
+                        f"AI输出被max_tokens上限截断（{truncation_reason}），"
+                        f"当前预算={max_output_tokens}"
+                    )
+
                 return extract_ai_response_content(response)
+            except AIResponseTruncatedError as exc:
+                if attempt < max_attempts - 1:
+                    print(
+                        f"AI输出被截断，正在提高预算后重试 "
+                        f"({attempt + 2}/{max_attempts}): {exc}"
+                    )
+                    max_output_tokens = min(
+                        max_output_tokens * 2,
+                        DEFAULT_MAX_OUTPUT_TOKENS * 4,
+                    )
+                    continue
+                raise exc
             except EmptyAIResponseError as exc:
                 if attempt < max_attempts - 1:
                     print(

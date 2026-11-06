@@ -101,6 +101,57 @@ def is_chat_completions_api_unsupported_error(error: Exception) -> bool:
     return _is_api_unsupported_error(error, CHAT_COMPLETIONS_API_UNSUPPORTED_MARKERS)
 
 
+def detect_response_truncation(response: Any) -> tuple[bool, str]:
+    """检测响应是否因 max_tokens 上限被截断。
+
+    返回 (是否截断, 原因描述)。两种 API 模式都要覆盖：
+
+    - Chat Completions: ``choices[0].finish_reason == "length"``
+    - Responses API: ``status == "incomplete"`` 且
+      ``incomplete_details.reason == "max_output_tokens"``
+
+    推理模型（reasoning model）的推理 token 与最终答案共享同一个
+    ``max_tokens`` 预算，预算不足时 content 会被挤成空字符串。调用方必须在
+    提取内容之前先做这一步判断，否则空 content 会退化成"JSON 解析失败"这种
+    掩盖真实原因的报错。
+    """
+    if response is None:
+        return False, ""
+
+    choices = getattr(response, "choices", None)
+    if choices:
+        finish_reason = getattr(choices[0], "finish_reason", None)
+        if finish_reason == "length":
+            return True, f"finish_reason=length（{_describe_usage(response)}）"
+        return False, ""
+
+    status = getattr(response, "status", None)
+    if status == "incomplete":
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None) if details is not None else None
+        if reason in (None, "max_output_tokens"):
+            return True, f"status=incomplete（reason={reason}，{_describe_usage(response)}）"
+        return False, ""
+
+    return False, ""
+
+
+def _describe_usage(response: Any) -> str:
+    """提取 usage 摘要，用于截断诊断信息。"""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return "无 usage 信息"
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    details = getattr(usage, "completion_tokens_details", None)
+    reasoning_tokens = getattr(details, "reasoning_tokens", None) if details else None
+    parts = []
+    if completion_tokens is not None:
+        parts.append(f"completion_tokens={completion_tokens}")
+    if reasoning_tokens is not None:
+        parts.append(f"reasoning_tokens={reasoning_tokens}")
+    return ", ".join(parts) if parts else "无 usage 信息"
+
+
 def build_ai_request_params(
     api_mode: str,
     *,

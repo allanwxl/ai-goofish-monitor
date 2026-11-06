@@ -9,6 +9,15 @@ class EmptyAIResponseError(ValueError):
     """AI 返回了空内容。"""
 
 
+class AIResponseTruncatedError(EmptyAIResponseError):
+    """AI 输出因 max_tokens 上限被截断。
+
+    推理模型的推理 token 与最终答案共享同一个 max_tokens 预算，预算不足时
+    content 会被挤成空字符串。调用方应当提高预算后重试，而不是把空内容当成
+    "JSON 格式错误"。
+    """
+
+
 def extract_ai_response_content(response: Any) -> str:
     """从不同形态的 AI 响应中提取文本内容。"""
     if response is None:
@@ -44,13 +53,17 @@ def extract_ai_response_content(response: Any) -> str:
     raise ValueError(f"无法识别的AI响应类型: {type(response).__name__}")
 
 
-def parse_ai_response_json(content: str) -> dict:
-    """解析 AI 文本响应中的 JSON。"""
+def parse_ai_response_json(content: str) -> Any:
+    """解析 AI 文本响应中的 JSON。
+
+    正常情况下返回 dict。若整个响应本身就是 JSON 数组则原样返回 list，
+    调用方需自行校验类型（见 ai_handler.validate_ai_response_format）。
+    """
     cleaned = _strip_code_fences(content)
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        return _extract_first_json_value(cleaned, exc)
+    except json.JSONDecodeError:
+        return _extract_first_json_value(cleaned)
 
 
 def _coerce_content_parts(content: Any) -> str:
@@ -97,15 +110,19 @@ def _strip_code_fences(content: str) -> str:
     return cleaned.strip()
 
 
-def _extract_first_json_value(
-    content: str,
-    fallback_error: json.JSONDecodeError,
-):
+def _extract_first_json_value(content: str):
+    """从文本中提取第一个可解析的 JSON 对象。
+
+    本项目的输出 schema 强制要求顶层是 JSON 对象，因此这里只尝试 ``{`` 位置。
+    之前的实现同时接受 ``[``，在响应被 max_tokens 截断时会把嵌套数组
+    （例如 risk_tags）误当成完整结果返回，导致后续校验报出误导性的
+    "缺少必需字段"。
+    """
     decoder = json.JSONDecoder()
     last_error: json.JSONDecodeError | None = None
 
     for start_index, char in enumerate(content):
-        if char not in "{[":
+        if char != "{":
             continue
         try:
             parsed, _ = decoder.raw_decode(content[start_index:])
@@ -113,6 +130,8 @@ def _extract_first_json_value(
         except json.JSONDecodeError as exc:
             last_error = exc
 
+    preview = content.strip()[:200]
+    message = f"AI响应中未找到可解析的JSON对象（已尝试所有 '{{' 位置）: {preview!r}"
     if last_error is not None:
-        raise last_error
-    raise fallback_error
+        message += f"；最后一次解析错误: {last_error}"
+    raise json.JSONDecodeError(message, content, 0)

@@ -19,6 +19,7 @@ if sys.platform.startswith('win'):
 
 from src.config import (
     AI_DEBUG_MODE,
+    AI_MAX_OUTPUT_TOKENS,
     IMAGE_DOWNLOAD_HEADERS,
     IMAGE_SAVE_DIR,
     TASK_IMAGE_DIR_PREFIX,
@@ -31,6 +32,7 @@ from src.ai_message_builder import (
     build_user_message_content,
 )
 from src.services.ai_response_parser import (
+    AIResponseTruncatedError,
     EmptyAIResponseError,
     extract_ai_response_content,
     parse_ai_response_json,
@@ -40,6 +42,7 @@ from src.services.ai_request_compat import (
     RESPONSES_API_MODE,
     build_ai_request_params,
     create_ai_response_async,
+    detect_response_truncation,
     is_chat_completions_api_unsupported_error,
     is_json_output_unsupported_error,
     is_responses_api_unsupported_error,
@@ -48,6 +51,11 @@ from src.services.ai_request_compat import (
 )
 from src.services.notification_service import build_notification_service
 from src.utils import convert_goofish_link, retry_on_failure
+
+
+# 单次 AI 调用的输出 token 上限硬顶。推理模型每次截断后预算翻倍，但不超过
+# MiniMax M3 推荐的 131072 上限。
+AI_MAX_OUTPUT_TOKENS_HARD_CAP = 131072
 
 
 def _positive_int(value, default: int) -> int:
@@ -239,6 +247,14 @@ def encode_image_to_base64(image_path):
 
 def validate_ai_response_format(parsed_response):
     """验证AI响应的格式是否符合预期结构"""
+    if not isinstance(parsed_response, dict):
+        safe_print(
+            "   [AI分析] 警告：响应不是JSON对象"
+            f"（实际为 {type(parsed_response).__name__}），"
+            "通常是输出被截断导致解析到了嵌套片段。"
+        )
+        return False
+
     required_fields = [
         "prompt_version",
         "is_recommended",
@@ -373,6 +389,9 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
     api_mode = CHAT_COMPLETIONS_API_MODE
     use_response_format = ENABLE_RESPONSE_FORMAT
     use_temperature = True
+    # 推理模型的推理 token 与最终答案共享同一个 max_tokens 预算，预算不足时
+    # content 会被挤空（finish_reason=length）。从配置预算起步，遇到截断时翻倍。
+    current_max_output_tokens = AI_MAX_OUTPUT_TOKENS
     for attempt in range(max_retries):
         try:
             # 根据重试次数调整参数
@@ -385,7 +404,7 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=current_temperature,
-                max_output_tokens=4000,
+                max_output_tokens=current_max_output_tokens,
                 enable_json_output=use_response_format,
             )
             if not use_temperature:
@@ -409,6 +428,17 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 api_mode,
                 request_params,
             )
+
+            # 必须在提取内容之前判断截断：截断时 content 会被挤成空字符串，
+            # 若继续走提取逻辑会回退到 reasoning_content，把"输出被截断"伪装成
+            # "JSON 解析失败"，掩盖真正的根因。
+            truncated, truncation_reason = detect_response_truncation(response)
+            if truncated:
+                raise AIResponseTruncatedError(
+                    f"AI输出被max_tokens上限截断（{truncation_reason}），"
+                    f"当前预算={current_max_output_tokens}"
+                )
+
             ai_response_content = extract_ai_response_content(response)
 
             if AI_DEBUG_MODE:
@@ -419,6 +449,17 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
 
             try:
                 parsed_response = parse_ai_response_json(ai_response_content)
+
+                if not isinstance(parsed_response, dict):
+                    safe_print(
+                        f"   [AI分析] 第{attempt + 1}次尝试解析结果不是JSON对象"
+                        f"（实际为 {type(parsed_response).__name__}），"
+                        "通常是输出被截断导致解析到了嵌套片段。"
+                    )
+                    if attempt < max_retries - 1:
+                        safe_print(f"   [AI分析] 准备第{attempt + 2}次重试...")
+                        continue
+                    raise ValueError("AI响应不是JSON对象，无法通过格式校验。")
 
                 # 验证响应格式
                 if validate_ai_response_format(parsed_response):
@@ -443,6 +484,27 @@ async def get_ai_analysis(product_data, image_paths=None, prompt_text=""):
                 raise e
 
         except Exception as e:
+            if isinstance(e, AIResponseTruncatedError):
+                # 截断意味着预算不足，用同样的预算重试必然同样失败，因此提升预算。
+                next_budget = min(
+                    current_max_output_tokens * 2,
+                    AI_MAX_OUTPUT_TOKENS_HARD_CAP,
+                )
+                if next_budget > current_max_output_tokens:
+                    safe_print(
+                        f"   [AI分析] 第{attempt + 1}次尝试输出被截断，"
+                        f"将输出预算从 {current_max_output_tokens} 提升到 {next_budget} 后重试。"
+                    )
+                    current_max_output_tokens = next_budget
+                else:
+                    safe_print(
+                        f"   [AI分析] 第{attempt + 1}次尝试输出被截断，"
+                        f"输出预算已达硬上限 {AI_MAX_OUTPUT_TOKENS_HARD_CAP}。"
+                    )
+                if attempt < max_retries - 1:
+                    continue
+                raise e
+
             if (
                 api_mode == CHAT_COMPLETIONS_API_MODE
                 and is_chat_completions_api_unsupported_error(e)

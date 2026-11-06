@@ -48,6 +48,12 @@ AI_DEBUG_MODE = os.getenv("AI_DEBUG_MODE", "false").lower() == "true"
 SKIP_AI_ANALYSIS = os.getenv("SKIP_AI_ANALYSIS", "false").lower() == "true"
 ENABLE_THINKING = os.getenv("ENABLE_THINKING", "false").lower() == "true"
 ENABLE_RESPONSE_FORMAT = os.getenv("ENABLE_RESPONSE_FORMAT", "true").lower() == "true"
+# 单次 AI 调用的输出 token 上限。推理模型的推理 token 与最终答案共享该预算，
+# 预算过小会导致 content 被挤空（finish_reason=length）。
+try:
+    AI_MAX_OUTPUT_TOKENS = int(os.getenv("AI_MAX_OUTPUT_TOKENS", "32768"))
+except (TypeError, ValueError):
+    AI_MAX_OUTPUT_TOKENS = 32768
 
 # --- Headers ---
 IMAGE_DOWNLOAD_HEADERS = {
