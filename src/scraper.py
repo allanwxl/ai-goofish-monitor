@@ -399,6 +399,45 @@ def _build_extra_headers(raw_headers: Optional[dict]) -> dict:
     return headers
 
 
+LOGIN_MODAL_SELECTOR = "div[class*='login-modal-wrap']"
+LOGIN_MODAL_CLOSE_SELECTORS = (
+    "div[class*='login-modal-wrap'] div[class*='closeIconBg']",
+    "div[class*='login-modal-wrap'] .ant-modal-close",
+    "div[class*='login-modal-wrap'] span[class*='closeIcon']",
+)
+
+
+async def _dismiss_login_modal(page) -> bool:
+    """检测并尝试关闭闲鱼的登录弹窗。
+
+    登录弹窗（``ant-modal-wrap login-modal-wrap-*``）会覆盖整个页面并拦截所有
+    指针事件，导致后续任何 click 都只能等到超时。没有它检测的时候，每个卖家
+    主页都会白白卡满 30 秒。
+
+    返回 True 表示确实检测到并成功关闭了弹窗。
+    """
+    try:
+        if await page.locator(LOGIN_MODAL_SELECTOR).count() == 0:
+            return False
+    except Exception:
+        return False
+
+    print("      [登录弹窗] 检测到登录弹窗遮挡页面，尝试关闭...")
+    for selector in LOGIN_MODAL_CLOSE_SELECTORS:
+        try:
+            await page.click(selector, timeout=3000)
+            await random_sleep(1, 2)
+            print("      [登录弹窗] 登录弹窗已关闭。")
+            return True
+        except PlaywrightTimeoutError:
+            continue
+        except Exception:
+            continue
+
+    print("      [登录弹窗] 未能关闭登录弹窗。")
+    return False
+
+
 async def scrape_user_profile(context, user_id: str) -> dict:
     """
     【新版】访问指定用户的个人主页，按顺序采集其摘要信息、完整的商品列表和完整的评价列表。
@@ -474,9 +513,24 @@ async def scrape_user_profile(context, user_id: str) -> dict:
 
         # --- 任务3: 点击并采集所有评价 ---
         print("      [采集阶段] 开始采集该用户的评价列表...")
+        # 登录弹窗会拦截页签点击，先尝试关闭再点。
+        if await _dismiss_login_modal(page):
+            await random_sleep(1, 2)
+
         rating_tab_locator = page.locator("//div[text()='信用及评价']/ancestor::li")
+        ratings_clicked = False
         if await rating_tab_locator.count() > 0:
-            await rating_tab_locator.click()
+            try:
+                await rating_tab_locator.click(timeout=15000)
+                ratings_clicked = True
+            except PlaywrightTimeoutError:
+                # 弹窗遮挡等导致的点击失败：跳过评价采集，保留已采集的头部与商品列表，
+                # 不再让每个卖家白白卡满 30 秒。
+                print("      [警告] 评价选项卡点击超时（可能被登录弹窗遮挡），跳过评价列表采集。")
+        else:
+            print("      [警告] 未找到评价选项卡，跳过评价采集。")
+
+        if ratings_clicked:
             await random_sleep(3, 5)  # 等待第一页评价API完成
 
             while not stop_rating_scrolling.is_set():
@@ -490,8 +544,6 @@ async def scrape_user_profile(context, user_id: str) -> dict:
             profile_data["卖家收到的评价列表"] = await parse_ratings_data(all_ratings)
             reputation_stats = await calculate_reputation_from_ratings(all_ratings)
             profile_data.update(reputation_stats)
-        else:
-            print("      [警告] 未找到评价选项卡，跳过评价采集。")
 
     except Exception as e:
         print(f"   [错误] 采集用户 {user_id} 信息时发生错误: {e}")
