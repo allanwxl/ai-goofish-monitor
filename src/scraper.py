@@ -44,7 +44,7 @@ from src.utils import (
     safe_get,
     save_to_jsonl,
 )
-from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem
+from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem, can_rotate_after_failure
 from src.failure_guard import FailureGuard
 from src.services.account_strategy_service import resolve_account_runtime_plan
 from src.infrastructure.persistence.storage_names import build_result_filename
@@ -647,6 +647,18 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             return selected_proxy
         picked = proxy_pool.pick_random()
         return picked or selected_proxy
+
+    def _has_rotation_resource() -> bool:
+        """判断失败后是否还有可切换的账号/代理资源。"""
+        return can_rotate_after_failure(
+            account_enabled=rotation_settings["account_enabled"],
+            account_mode=rotation_settings["account_mode"],
+            available_account_count=len(account_pool.available_items()),
+            forced_account=bool(forced_account),
+            proxy_enabled=rotation_settings["proxy_enabled"],
+            proxy_mode=rotation_settings["proxy_mode"],
+            available_proxy_count=len(proxy_pool.available_items()),
+        )
 
     async def _run_scrape_attempt(state_file: str, proxy_server: Optional[str]) -> int:
         processed_item_count = 0
@@ -1379,7 +1391,14 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         except RiskControlError as e:
             last_error = str(e)
             print(f"检测到风控或验证触发: {e}")
-            # 风控验证通常不是简单轮换能解决的，避免无意义重试。
+            # 风控可能是账号指纹级、也可能是 IP 级：
+            #   - 账号级 -> 换一个独立登录态的账号通常能绕开
+            #   - IP 级  -> 必须换代理才有效，换账号无效
+            # 所以开启了账号/代理轮换且池中还有第二个可用资源时，轮换后重试；
+            # 没有可用轮换资源时保持立即放弃，避免无意义重试。
+            if attempt < attempt_limit and _has_rotation_resource():
+                print("已启用账号/代理轮换，将轮换后重试本次任务...")
+                continue
             break
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"
