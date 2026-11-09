@@ -183,6 +183,24 @@ class FailureGuard:
         data.setdefault("version", 1)
         return data
 
+    @staticmethod
+    def _align_timezone(
+        value: Optional[datetime], reference: datetime
+    ) -> Optional[datetime]:
+        """把无时区的时间对齐到 reference 的时区状态。
+
+        守卫文件可能被手工编辑、由旧版本写入，或来自不带偏移量的字符串。
+        naive 与 aware 的 datetime 直接比较会抛 TypeError，
+        进而让整个任务启动接口 500 —— 这里统一对齐，保证比较永远合法。
+        """
+        if value is None:
+            return None
+        if value.tzinfo is None and reference.tzinfo is not None:
+            return value.replace(tzinfo=reference.tzinfo)
+        if value.tzinfo is not None and reference.tzinfo is None:
+            return value.replace(tzinfo=None)
+        return value
+
     def _save(self, data: dict) -> None:
         _atomic_write_json(self.path, data)
 
@@ -232,7 +250,9 @@ class FailureGuard:
         if not isinstance(entry, dict):
             entry = {}
 
-        paused_until = _str_to_dt(entry.get("paused_until"))
+        paused_until = self._align_timezone(
+            _str_to_dt(entry.get("paused_until")), current
+        )
         consecutive = _as_int(entry.get("consecutive_failures"), 0)
         last_reason = (entry.get("last_failure_reason") or "").strip() or "未知错误"
         last_notified_date = entry.get("last_notified_date")
@@ -312,7 +332,9 @@ class FailureGuard:
 
         def _apply(entry: dict) -> dict:
             entry = dict(entry or {})
-            previous_paused_until = _str_to_dt(entry.get("paused_until"))
+            previous_paused_until = self._align_timezone(
+                _str_to_dt(entry.get("paused_until")), current
+            )
             was_paused = bool(previous_paused_until and current < previous_paused_until)
 
             prev_mtime = entry.get("cookie_mtime")
