@@ -1,0 +1,66 @@
+services:
+  ai-goofish:
+    image: ghcr.io/allanwxl/ai-goofish:latest
+    container_name: ai-goofish
+    restart: unless-stopped
+    network_mode: host
+    # 把宿主机 .env 的变量注入容器环境（与 ././env:/app/.env 配合使用）
+    env_file:
+      - .env
+    environment:
+      # —— 应用基础 ——
+      TZ: Asia/Shanghai
+      SERVER_PORT: "2323"
+      WEB_USERNAME: admin
+      # 密码不放 compose 里（仓库是公开的），统一从宿主机 .env 读取
+      WEB_PASSWORD: "${WEB_PASSWORD:?请在宿主机 .env 中设置 WEB_PASSWORD}"
+      RUNNING_IN_DOCKER: "true"
+      RUN_HEADLESS: "true"
+      # SQLite 路径（与下面 ai-goofish-data 卷对应）
+      APP_DATABASE_FILE: /app/data/app.sqlite3
+      # AI 单次输出 token 上限：推理模型的思考 token 与最终答案共享这个预算，
+      # 值太小会导致回答被截断（表现为 JSON 解析失败）。32768 已实测可用。
+      AI_MAX_OUTPUT_TOKENS: "32768"
+      # —— AI / 通知 / 代理 ——
+      # 不要在这里写空字符串：进程环境变量优先级高于 .env 文件，
+      # 写成 "" 会盖掉 Web UI 写入 /app/.env 的同名配置。
+      # 需要固定值时，把真实值填到宿主机 .env 里，或取消注释直接写在这里。
+      # OPENAI_API_KEY: "sk-..."
+      # OPENAI_BASE_URL: "https://api.minimaxi.com/v1"
+      # OPENAI_MODEL_NAME: "MiniMax-M3.1-Flash"
+      # PROXY_URL: ""
+      # NTFY_TOPIC_URL: ""
+      # GOTIFY_URL: ""
+      # GOTIFY_TOKEN: ""
+      # BARK_URL: ""
+      # WX_BOT_URL: ""
+      # TELEGRAM_BOT_TOKEN: ""
+      # TELEGRAM_CHAT_ID: ""
+      # WEBHOOK_URL: ""
+    volumes:
+      - ai-goofish-data:/app/data
+      - ai-goofish-logs:/app/logs
+      - ai-goofish-state:/app/state
+      - ai-goofish-prompts:/app/prompts
+      - ai-goofish-jsonl:/app/jsonl
+      - ai-goofish-price-history:/app/price_history
+      - ai-goofish-images:/app/images
+      # Web UI 保存的 AI/通知配置写进容器内的 /app/.env，
+      # 绑定挂载保证容器重建后不丢（宿主机需先 touch .env 建好这个文件）
+      - ./.env:/app/.env
+    healthcheck:
+      # 端口必须与 SERVER_PORT 一致，否则容器永远 unhealthy
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:2323/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ai-goofish-data:
+  ai-goofish-logs:
+  ai-goofish-state:
+  ai-goofish-prompts:
+  ai-goofish-jsonl:
+  ai-goofish-price-history:
+  ai-goofish-images:
