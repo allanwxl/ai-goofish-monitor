@@ -8,7 +8,7 @@ from typing import List
 
 from src.core.cron_utils import build_cron_trigger
 from src.domain.models.task import Task
-from src.services.process_service import ProcessService
+from src.services.process_service import ProcessService, TaskStartBlockedError
 
 
 class SchedulerService:
@@ -78,4 +78,8 @@ class SchedulerService:
     async def _run_task(self, task_id: int, task_name: str):
         """执行定时任务"""
         print(f"定时任务触发: 正在为任务 '{task_name}' 启动爬虫...")
-        await self.process_service.start_task(task_id, task_name)
+        try:
+            await self.process_service.start_task(task_id, task_name)
+        except TaskStartBlockedError as exc:
+            # 熔断属于预期内状态，不能让异常打断调度器。
+            print(f"定时任务 '{task_name}' 已被熔断跳过: {exc.reason}")

@@ -22,6 +22,49 @@ SPIDER_DEBUG_LIMIT_ENV = "SPIDER_DEBUG_LIMIT"
 LifecycleHook = Callable[[int], Awaitable[None] | None]
 
 
+class TaskStartBlockedError(Exception):
+    """任务因失败熔断被拒绝启动。
+
+    与普通的"启动失败"区分开：调用方可以据此返回 409 并把暂停原因、
+    暂停到期时间等结构化信息透传给前端。
+    """
+
+    def __init__(
+        self,
+        task_name: str,
+        *,
+        reason: str = "",
+        paused_until: datetime | None = None,
+        consecutive_failures: int = 0,
+        threshold: int = 0,
+    ):
+        super().__init__(task_name)
+        self.task_name = task_name
+        self.reason = reason or "未知错误"
+        self.paused_until = paused_until
+        self.consecutive_failures = consecutive_failures
+        self.threshold = threshold
+
+    @property
+    def message(self) -> str:
+        parts = [f"任务 '{self.task_name}' 因连续失败 {self.consecutive_failures} 次已暂停重试"]
+        if self.paused_until is not None:
+            parts.append(f"暂停至 {self.paused_until.strftime('%Y-%m-%d %H:%M:%S')}")
+        parts.append(f"原因: {self.reason}")
+        parts.append("修复方法: 更新登录态/cookies 文件后会自动恢复")
+        return "；".join(parts)
+
+    def to_payload(self) -> dict:
+        return {
+            "message": self.message,
+            "task_name": self.task_name,
+            "reason": self.reason,
+            "paused_until": self.paused_until.isoformat() if self.paused_until else None,
+            "consecutive_failures": self.consecutive_failures,
+            "threshold": self.threshold,
+        }
+
+
 class ProcessService:
     """进程管理服务"""
 
@@ -143,7 +186,13 @@ class ProcessService:
         )
         if decision.skip:
             await self._notify_skip(task_name, decision)
-            return False
+            raise TaskStartBlockedError(
+                task_name,
+                reason=decision.reason,
+                paused_until=decision.paused_until,
+                consecutive_failures=decision.consecutive_failures,
+                threshold=self.failure_guard.threshold,
+            )
 
         log_file_path = ""
         log_file_handle = None

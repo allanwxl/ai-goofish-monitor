@@ -13,7 +13,7 @@ from src.api.dependencies import (
     get_task_service,
 )
 from src.services.task_service import TaskService
-from src.services.process_service import ProcessService
+from src.services.process_service import ProcessService, TaskStartBlockedError
 from src.services.scheduler_service import SchedulerService
 from src.services.task_generation_service import TaskGenerationService
 from src.services.task_generation_runner import (
@@ -249,6 +249,8 @@ async def delete_task(
     except Exception as e:
         print(f"删除任务日志文件时出错: {e}")
     return {"message": "任务删除成功"}
+
+
 @router.post("/start/{task_id}", response_model=dict)
 async def start_task(
     task_id: int,
@@ -263,10 +265,17 @@ async def start_task(
         raise HTTPException(status_code=400, detail="任务已被禁用，无法启动")
     if task.is_running:
         raise HTTPException(status_code=400, detail="任务已在运行中")
-    success = await process_service.start_task(task_id, task.task_name)
+    try:
+        success = await process_service.start_task(task_id, task.task_name)
+    except TaskStartBlockedError as exc:
+        # 熔断（连续失败暂停重试）是预期状态，用 409 + 结构化信息告知前端，
+        # 而不是笼统的 500，避免用户以为是随机故障。
+        raise HTTPException(status_code=409, detail=exc.to_payload())
     if not success:
         raise HTTPException(status_code=500, detail="启动任务失败")
     return {"message": f"任务 '{task.task_name}' 已启动"}
+
+
 @router.post("/stop/{task_id}", response_model=dict)
 async def stop_task(
     task_id: int,
