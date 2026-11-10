@@ -258,7 +258,13 @@ class FailureGuard:
         last_notified_date = entry.get("last_notified_date")
 
         previous_cookie_mtime = entry.get("cookie_mtime")
-        if cookie_path and previous_cookie_mtime is not None:
+        # cookie_mtime 是失败时按"当时实际使用的那个登录态文件"记录的，
+        # 因此必须和同一个文件比较。
+        # 传入的 cookie_path 来自任务配置(account_state_file / 默认 STATE_FILE)，
+        # 在账号轮换场景下往往和实际使用的文件不是同一个 —— 混用会导致
+        # 自动恢复永远不触发，或在登录态没变时误判为已恢复。
+        effective_cookie_path = entry.get("cookie_path") or cookie_path
+        if effective_cookie_path and previous_cookie_mtime is not None:
             try:
                 previous_cookie_mtime = float(previous_cookie_mtime)
             except (TypeError, ValueError):
@@ -267,8 +273,8 @@ class FailureGuard:
         if (
             paused_until
             and paused_until > current
-            and cookie_path
-            and _cookie_changed(cookie_path, previous_cookie_mtime)
+            and effective_cookie_path
+            and _cookie_changed(effective_cookie_path, previous_cookie_mtime)
         ):
             # cookies / 登录态更新 => 自动恢复
             self.record_success(task_key, now=current)
