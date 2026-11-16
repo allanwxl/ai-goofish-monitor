@@ -117,6 +117,36 @@ class AppSettings(_EnvSettings):
         os.makedirs(self.image_save_dir, exist_ok=True)
 
 
+class MCPSettings(_EnvSettings):
+    """MCP 服务配置
+
+    安全默认值：默认关闭、默认只监听本机、未配置 API Key 时拒绝启动。
+    """
+    enabled: bool = _env_field(False, "MCP_ENABLED")
+    host: str = _env_field("127.0.0.1", "MCP_HOST")
+    port: int = _env_field(8001, "MCP_PORT")
+    api_keys: str = _env_field("", "MCP_API_KEYS")
+    allowed_tools: str = _env_field("", "MCP_ALLOWED_TOOLS")
+
+    def parsed_api_keys(self) -> list[str]:
+        """返回配置中的 API Key 明文列表（逗号分隔，支持 key:tenant）。"""
+        result: list[str] = []
+        for chunk in (self.api_keys or "").split(","):
+            item = chunk.strip()
+            if not item:
+                continue
+            result.append(item.split(":", 1)[0].strip())
+        return [item for item in result if item]
+
+    def parsed_allowed_tools(self) -> list[str]:
+        """返回允许暴露的 tool 白名单；为空表示全部开放。"""
+        return [
+            item.strip()
+            for item in (self.allowed_tools or "").split(",")
+            if item.strip()
+        ]
+
+
 # 全局配置实例（单例模式）
 _settings_instance = None
 
@@ -130,7 +160,7 @@ def get_settings() -> AppSettings:
 
 def reload_settings() -> None:
     """重新加载全局配置实例"""
-    global _settings_instance, settings, ai_settings, notification_settings, scraper_settings
+    global _settings_instance, settings, ai_settings, notification_settings, scraper_settings, mcp_settings
     from dotenv import load_dotenv
     from src.infrastructure.config.env_manager import env_manager
 
@@ -140,6 +170,7 @@ def reload_settings() -> None:
     ai_settings = AISettings()
     notification_settings = NotificationSettings()
     scraper_settings = ScraperSettings()
+    mcp_settings = MCPSettings()
 
 
 # 导出便捷访问的配置实例
@@ -147,3 +178,4 @@ settings = get_settings()
 ai_settings = AISettings()
 notification_settings = NotificationSettings()
 scraper_settings = ScraperSettings()
+mcp_settings = MCPSettings()
