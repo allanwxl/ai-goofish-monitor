@@ -19,7 +19,7 @@ def test_suggest_schedule_returns_cron(api_client, sample_task_payload, monkeypa
 
     response = api_client.post(
         "/api/tasks/suggest-schedule",
-        json={"task_name": "新任务", "keyword": "sony a7m4"},
+        json={"task_name": "新任务", "keyword": "sony a7m4", "frequency": "daily"},
     )
 
     assert response.status_code == 200
@@ -27,6 +27,69 @@ def test_suggest_schedule_returns_cron(api_client, sample_task_payload, monkeypa
     assert payload["cron"] == "17 3 * * *"
     assert payload["source"] == "ai"
     assert payload["considered_tasks"] == 1
+
+
+def test_suggest_schedule_defaults_to_weekly(api_client, monkeypatch):
+    """不传 frequency 时按每周生成。"""
+    captured = {}
+
+    async def fake_request_ai(self, prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "17 3 * * 0"
+
+    monkeypatch.setattr(ScheduleSuggestionService, "request_ai", fake_request_ai)
+
+    response = api_client.post("/api/tasks/suggest-schedule", json={"task_name": "新任务"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cron"] == "17 3 * * 0"
+    assert payload["source"] == "ai"
+    # 提示词里必须写明每周执行的要求
+    assert "每周执行一次" in captured["prompt"]
+
+
+def test_suggest_schedule_honors_frequency(api_client, monkeypatch):
+    """传入 frequency 时，AI 生成的 cron 必须符合该频率。"""
+    captured = {}
+
+    async def fake_request_ai(self, prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "17 3 */2 * *"
+
+    monkeypatch.setattr(ScheduleSuggestionService, "request_ai", fake_request_ai)
+
+    response = api_client.post(
+        "/api/tasks/suggest-schedule",
+        json={"task_name": "新任务", "frequency": "every_2_days"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cron"] == "17 3 */2 * *"
+    assert payload["source"] == "ai"
+    assert "每两天执行一次" in captured["prompt"]
+
+
+def test_suggest_schedule_rejects_cron_with_wrong_frequency(
+    api_client, monkeypatch
+):
+    """AI 无视频率要求时，接口不应把「每天一次」的结果当成每周返回。"""
+    async def fake_request_ai(self, prompt: str) -> str:
+        return "17 3 * * *"
+
+    monkeypatch.setattr(ScheduleSuggestionService, "request_ai", fake_request_ai)
+
+    response = api_client.post(
+        "/api/tasks/suggest-schedule",
+        json={"task_name": "新任务", "frequency": "weekly"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    # 三轮都被判为频率不符，最终落到符合频率的兜底方案
+    assert payload["source"] == "fallback"
+    assert payload["cron"].split()[-1] in {"0", "1", "2", "3", "4", "5", "6"}
 
 
 def test_suggest_schedule_excludes_current_task(

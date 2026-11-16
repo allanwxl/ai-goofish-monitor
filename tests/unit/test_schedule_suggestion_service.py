@@ -7,14 +7,24 @@ from typing import List, Optional
 
 import pytest
 
-from src.domain.models.task import Task
+from src.domain.models.task import (
+    DEFAULT_SCHEDULE_FREQUENCY,
+    SCHEDULE_FREQUENCY_DAILY,
+    SCHEDULE_FREQUENCY_EVERY_2_DAYS,
+    SCHEDULE_FREQUENCY_EVERY_3_DAYS,
+    SCHEDULE_FREQUENCY_WEEKLY,
+    Task,
+)
 from src.services.schedule_suggestion_service import (
     CONFLICT_WINDOW_MINUTES,
     FALLBACK_HOURS,
     FALLBACK_MINUTES,
+    FREQUENCY_LOOKAHEAD_HOURS,
     BusySlot,
     ScheduleSuggestionError,
     ScheduleSuggestionService,
+    cron_matches_frequency,
+    normalize_frequency,
 )
 
 
@@ -154,7 +164,13 @@ def test_suggest_returns_ai_cron_when_no_conflict(now: datetime):
     tasks = [make_task(1, "MacBook", "0 8 * * *")]
 
     suggestion = asyncio.run(
-        service.suggest(tasks=tasks, task_name="索尼A7M4", keyword="a7m4", now=now)
+        service.suggest(
+            tasks=tasks,
+            task_name="索尼A7M4",
+            keyword="a7m4",
+            frequency=SCHEDULE_FREQUENCY_DAILY,
+            now=now,
+        )
     )
 
     assert suggestion.cron == "17 3 * * *"
@@ -170,7 +186,12 @@ def test_suggest_retries_when_ai_returns_conflicting_cron(now: datetime):
     tasks = [make_task(1, "MacBook", "0 8 * * *")]
 
     suggestion = asyncio.run(
-        service.suggest(tasks=tasks, task_name="新任务", now=now)
+        service.suggest(
+            tasks=tasks,
+            task_name="新任务",
+            frequency=SCHEDULE_FREQUENCY_DAILY,
+            now=now,
+        )
     )
 
     assert suggestion.cron == "17 3 * * *"
@@ -185,7 +206,12 @@ def test_suggest_retries_when_ai_returns_invalid_cron(now: datetime):
     service = ScheduleSuggestionService(ai_client=ai_client)
 
     suggestion = asyncio.run(
-        service.suggest(tasks=[], task_name="新任务", now=now)
+        service.suggest(
+            tasks=[],
+            task_name="新任务",
+            frequency=SCHEDULE_FREQUENCY_DAILY,
+            now=now,
+        )
     )
 
     assert suggestion.cron == "17 3 * * *"
@@ -247,7 +273,7 @@ def test_find_free_slot_returns_none_when_all_slots_taken(service, now: datetime
         for minute in FALLBACK_MINUTES
     ]
 
-    assert service.find_free_slot(busy, now) is None
+    assert service.find_free_slot(busy, now, frequency=SCHEDULE_FREQUENCY_DAILY) is None
 
 
 def test_suggest_raises_when_no_free_slot(now: datetime):
@@ -285,3 +311,147 @@ def test_suggest_excludes_task_itself(now: datetime):
 
     assert suggestion.considered_tasks == 0
     assert suggestion.avoided == []
+
+
+# ----------------------------------------------------------------------
+# 执行频率
+# ----------------------------------------------------------------------
+
+
+def test_normalize_frequency_falls_back_to_weekly():
+    """未知频率或缺省值都按每周处理。"""
+    assert normalize_frequency(None) == SCHEDULE_FREQUENCY_WEEKLY
+    assert normalize_frequency("") == SCHEDULE_FREQUENCY_WEEKLY
+    assert normalize_frequency("每天") == SCHEDULE_FREQUENCY_WEEKLY
+    assert normalize_frequency("DAILY") == SCHEDULE_FREQUENCY_DAILY
+    assert normalize_frequency("every_2_days") == SCHEDULE_FREQUENCY_EVERY_2_DAYS
+    assert DEFAULT_SCHEDULE_FREQUENCY == SCHEDULE_FREQUENCY_WEEKLY
+
+
+@pytest.mark.parametrize(
+    "cron,frequency,expected",
+    [
+        # 每周：日字段为 *，周字段固定某一天
+        ("17 3 * * 0", SCHEDULE_FREQUENCY_WEEKLY, True),
+        ("17 3 * * 6", SCHEDULE_FREQUENCY_WEEKLY, True),
+        ("17 3 * * *", SCHEDULE_FREQUENCY_WEEKLY, False),
+        ("17 3 * * 1-5", SCHEDULE_FREQUENCY_WEEKLY, False),
+        # 每两天 / 每 3 天：日字段是步长
+        ("17 3 */2 * *", SCHEDULE_FREQUENCY_EVERY_2_DAYS, True),
+        ("17 3 */3 * *", SCHEDULE_FREQUENCY_EVERY_2_DAYS, False),
+        ("17 3 */3 * *", SCHEDULE_FREQUENCY_EVERY_3_DAYS, True),
+        ("17 3 */2 * *", SCHEDULE_FREQUENCY_EVERY_3_DAYS, False),
+        # 每天：日、月份、周都是 *
+        ("17 3 * * *", SCHEDULE_FREQUENCY_DAILY, True),
+        ("17 3 */2 * *", SCHEDULE_FREQUENCY_DAILY, False),
+        ("17 3 * * 0", SCHEDULE_FREQUENCY_DAILY, False),
+    ],
+)
+def test_cron_matches_frequency(cron: str, frequency: str, expected: bool):
+    assert cron_matches_frequency(cron, frequency) is expected
+
+
+def test_cron_matches_frequency_rejects_garbage():
+    assert cron_matches_frequency("不是 cron", SCHEDULE_FREQUENCY_DAILY) is False
+    assert cron_matches_frequency(None, SCHEDULE_FREQUENCY_DAILY) is False
+
+
+def test_weekly_lookahead_covers_next_week():
+    """每周执行的校验窗口必须覆盖一整周，否则下一次触发会落在窗口外。"""
+    assert FREQUENCY_LOOKAHEAD_HOURS[SCHEDULE_FREQUENCY_WEEKLY] > 7 * 24
+    # 每 2 天 / 每 3 天的窗口也要大于各自周期
+    assert FREQUENCY_LOOKAHEAD_HOURS[SCHEDULE_FREQUENCY_EVERY_2_DAYS] > 2 * 24
+    assert FREQUENCY_LOOKAHEAD_HOURS[SCHEDULE_FREQUENCY_EVERY_3_DAYS] > 3 * 24
+
+
+def test_suggest_weekly_accepts_weekly_cron(now: datetime):
+    ai_client = FakeAIClient(["17 3 * * 0"])
+    service = ScheduleSuggestionService(ai_client=ai_client)
+
+    suggestion = asyncio.run(
+        service.suggest(
+            tasks=[],
+            task_name="新任务",
+            frequency=SCHEDULE_FREQUENCY_WEEKLY,
+            now=now,
+        )
+    )
+
+    assert suggestion.cron == "17 3 * * 0"
+    assert suggestion.source == "ai"
+    # 提示词里必须写清频率要求与周字段取值约定
+    assert "每周执行一次" in ai_client.prompts[0]
+    assert "0=周一" in ai_client.prompts[0]
+
+
+def test_suggest_retries_when_ai_ignores_frequency(now: datetime):
+    """AI 无视频率要求给出「每天一次」时，要反馈期望的字段形态让它重写。"""
+    ai_client = FakeAIClient(["17 3 * * *", "17 3 * * 0"])
+    service = ScheduleSuggestionService(ai_client=ai_client)
+
+    suggestion = asyncio.run(
+        service.suggest(
+            tasks=[],
+            task_name="新任务",
+            frequency=SCHEDULE_FREQUENCY_WEEKLY,
+            now=now,
+        )
+    )
+
+    assert suggestion.cron == "17 3 * * 0"
+    assert suggestion.source == "ai"
+    assert len(ai_client.prompts) == 2
+    assert "不符合要求的执行频率" in ai_client.prompts[1]
+
+
+@pytest.mark.parametrize(
+    "frequency",
+    [
+        SCHEDULE_FREQUENCY_WEEKLY,
+        SCHEDULE_FREQUENCY_EVERY_2_DAYS,
+        SCHEDULE_FREQUENCY_EVERY_3_DAYS,
+        SCHEDULE_FREQUENCY_DAILY,
+    ],
+)
+def test_suggest_fallback_respects_frequency(frequency: str, now: datetime):
+    """AI 不可用时，兜底算法给出的 cron 也必须符合所选频率。"""
+    ai_client = FakeAIClient([], error=RuntimeError("网关超时"))
+    service = ScheduleSuggestionService(ai_client=ai_client)
+
+    suggestion = asyncio.run(
+        service.suggest(
+            tasks=[],
+            task_name="新任务",
+            frequency=frequency,
+            now=now,
+        )
+    )
+
+    assert suggestion.source == "fallback"
+    assert cron_matches_frequency(suggestion.cron, frequency) is True
+
+
+def test_weekly_fallback_rotates_weekdays(service, now: datetime):
+    """每周兜底会从「下一个星期几」开始轮转，且冲突时顺延到后面的星期几。"""
+    first = service.find_free_slot([], now, frequency=SCHEDULE_FREQUENCY_WEEKLY)
+    assert first is not None
+
+    # 日期推进一天，轮转起点也跟着后移
+    later = service.find_free_slot(
+        [], now + timedelta(days=1), frequency=SCHEDULE_FREQUENCY_WEEKLY
+    )
+    assert later is not None
+    assert first.split()[-1] != later.split()[-1]
+
+    # 第一个星期几被占用时，应当顺延到下一个星期几，而不是原地打转
+    fires = service.collect_fire_times(
+        first,
+        now,
+        lookahead_hours=FREQUENCY_LOOKAHEAD_HOURS[SCHEDULE_FREQUENCY_WEEKLY],
+    )
+    busy = [BusySlot(when=fires[0], task_name="占位任务")]
+    second = service.find_free_slot(
+        busy, now, frequency=SCHEDULE_FREQUENCY_WEEKLY
+    )
+    assert second is not None
+    assert second.split()[-1] != first.split()[-1]

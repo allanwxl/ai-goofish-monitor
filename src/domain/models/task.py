@@ -289,6 +289,16 @@ class TaskUpdate(BaseModel):
         return self
 
 
+# 定时规则生成频率（前端下拉框取值）
+SCHEDULE_FREQUENCY_WEEKLY = "weekly"
+SCHEDULE_FREQUENCY_EVERY_2_DAYS = "every_2_days"
+SCHEDULE_FREQUENCY_EVERY_3_DAYS = "every_3_days"
+SCHEDULE_FREQUENCY_DAILY = "daily"
+
+# 默认按每周生成一次
+DEFAULT_SCHEDULE_FREQUENCY = SCHEDULE_FREQUENCY_WEEKLY
+
+
 class ScheduleSuggestRequest(BaseModel):
     """AI 生成定时规则的请求DTO"""
 
@@ -300,6 +310,9 @@ class ScheduleSuggestRequest(BaseModel):
     keyword: Optional[str] = None
     # 用户额外的偏好描述，例如"希望每天早上跑一次"
     preferred: Optional[str] = None
+    # 期望的执行频率：weekly / every_2_days / every_3_days / daily
+    # 缺省传 None 时按 DEFAULT_SCHEDULE_FREQUENCY（每周）处理
+    frequency: Optional[str] = None
 
 
 class TaskGenerateRequest(BaseModel):

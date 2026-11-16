@@ -11,7 +11,10 @@ CRON_ALIASES = {
     "@yearly": "0 0 1 1 *",
     "@annually": "0 0 1 1 *",
     "@monthly": "0 0 1 * *",
-    "@weekly": "0 0 * * 0",
+    # 注意：调度器用的是 APScheduler 的周字段约定（0=周一 ... 6=周日），
+    # 与标准 crontab（0=周日）相反。标准 crontab 的 @weekly 是「周日 00:00」，
+    # 这里必须展开成 6 才是周日；写成 0 会变成周一。
+    "@weekly": "0 0 * * 6",
     "@daily": "0 0 * * *",
     "@midnight": "0 0 * * *",
     "@hourly": "0 * * * *",

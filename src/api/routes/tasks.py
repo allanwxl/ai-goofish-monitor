@@ -103,6 +103,7 @@ async def suggest_schedule(
             keyword=req.keyword or "",
             exclude_task_id=req.task_id,
             preferred=req.preferred or "",
+            frequency=req.frequency or "",
         )
         return suggestion.to_payload()
     except ScheduleSuggestionError as exc:

@@ -76,12 +76,16 @@ export interface TaskGenerateRequest {
 }
 
 // AI 生成避开其它任务执行时间的定时规则
+export type ScheduleFrequency = 'weekly' | 'every_2_days' | 'every_3_days' | 'daily';
+
 export interface ScheduleSuggestRequest {
   // 编辑已有任务时传入，用于把该任务自身排除在冲突检查之外
   task_id?: number | null;
   task_name?: string;
   keyword?: string;
   preferred?: string;
+  // 期望的执行频率，缺省按每周处理
+  frequency?: ScheduleFrequency;
 }
 
 export interface ScheduleSuggestResponse {

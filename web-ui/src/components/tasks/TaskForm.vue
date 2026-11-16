@@ -2,7 +2,7 @@
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Loader2, Sparkles } from 'lucide-vue-next'
-import type { Task, TaskGenerateRequest } from '@/types/task.d.ts'
+import type { Task, TaskGenerateRequest, ScheduleFrequency } from '@/types/task.d.ts'
 import { suggestSchedule } from '@/api/tasks'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -37,8 +37,18 @@ const accountStrategy = ref<'auto' | 'fixed' | 'rotate'>('auto')
 const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
 const cronMode = ref<'preset' | 'custom'>('preset')
+// AI 生成定时规则时要求的执行频率，默认每周
+const cronFrequency = ref<ScheduleFrequency>('weekly')
 const isSuggestingCron = ref(false)
 const cronSuggestion = ref<{ cron: string; reason: string; source: 'ai' | 'fallback'; avoided: string[] } | null>(null)
+
+// AI 生成定时规则时的频率选项
+const cronFrequencyOptions = computed(() => [
+  { value: 'weekly' as ScheduleFrequency, label: t('tasks.form.cronSuggest.frequency.weekly') },
+  { value: 'every_2_days' as ScheduleFrequency, label: t('tasks.form.cronSuggest.frequency.every2Days') },
+  { value: 'every_3_days' as ScheduleFrequency, label: t('tasks.form.cronSuggest.frequency.every3Days') },
+  { value: 'daily' as ScheduleFrequency, label: t('tasks.form.cronSuggest.frequency.daily') },
+])
 
 // 常用 cron 预设选项
 const cronPresets = computed(() => [
@@ -54,8 +64,10 @@ const cronPresets = computed(() => [
   { value: '0 18 * * *', label: t('tasks.form.cron.daily18') },
   { value: '0 20 * * *', label: t('tasks.form.cron.daily20') },
   { value: '0 8,12,18 * * *', label: t('tasks.form.cron.daily81218') },
-  { value: '0 9 * * 1-5', label: t('tasks.form.cron.weekday9') },
-  { value: '0 10 * * 6,0', label: t('tasks.form.cron.weekend10') },
+  // 周字段用的是调度器约定（0=周一 ... 6=周日），不是标准 crontab（0=周日）。
+  // 工作日 = 周一至周五 = 0-4；周末 = 周六周日 = 5,6。
+  { value: '0 9 * * 0-4', label: t('tasks.form.cron.weekday9') },
+  { value: '0 10 * * 5,6', label: t('tasks.form.cron.weekend10') },
 ])
 
 // 判断 cron 值是否为预设值
@@ -204,6 +216,7 @@ async function handleSuggestCron() {
       task_id: currentTaskId,
       task_name: String(form.value.task_name || ''),
       keyword: String(form.value.keyword || ''),
+      frequency: cronFrequency.value,
     })
     form.value.cron = result.cron
     cronMode.value = 'custom'
@@ -404,27 +417,41 @@ function handleSubmit() {
                 v-model="form.cron"
                 :placeholder="t('tasks.form.cronCustomPlaceholder')"
               />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                class="mt-2"
-                :disabled="isSuggestingCron"
-                @click="handleSuggestCron"
-              >
-                <Loader2 v-if="isSuggestingCron" class="animate-spin" />
-                <Sparkles v-else />
-                {{
-                  isSuggestingCron
-                    ? t('tasks.form.cronSuggest.generating')
-                    : t('tasks.form.cronSuggest.button')
-                }}
-              </Button>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <Select v-model="cronFrequency">
+                  <SelectTrigger class="w-36">
+                    <SelectValue :placeholder="t('tasks.form.cronSuggest.frequencyLabel')" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="option in cronFrequencyOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  :disabled="isSuggestingCron"
+                  @click="handleSuggestCron"
+                >
+                  <Loader2 v-if="isSuggestingCron" class="animate-spin" />
+                  <Sparkles v-else />
+                  {{
+                    isSuggestingCron
+                      ? t('tasks.form.cronSuggest.generating')
+                      : t('tasks.form.cronSuggest.button')
+                  }}
+                </Button>
+              </div>
               <p class="text-xs text-gray-500 mt-1">
                 {{ t('tasks.form.cronCustomHintLine1') }}
               </p>
               <p class="text-xs text-gray-500">
                 {{ t('tasks.form.cronCustomHintLine2') }}
+              </p>
+              <p class="text-xs text-gray-500">
+                {{ t('tasks.form.cronCustomHintLine3') }}
               </p>
               <div
                 v-if="cronSuggestion && cronSuggestion.cron === form.cron"

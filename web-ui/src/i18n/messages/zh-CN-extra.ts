@@ -71,6 +71,7 @@ const zhCNExtra = {
       cronCustomPlaceholder: '例如：0 8 * * * / 0 0 8 * * * / {\'@\'}daily',
       cronCustomHintLine1: '支持 5 段：分 时 日 月 周；6 段：秒 分 时 日 月 周；也支持 {\'@\'}hourly / {\'@\'}daily / {\'@\'}weekly / {\'@\'}monthly / {\'@\'}yearly。服务端时区为 Asia/Shanghai。',
       cronCustomHintLine2: '示例：每 15 分钟 */15 * * * *；每天 8 点 0 8 * * *；每天 8 点（带秒）0 0 8 * * *。',
+      cronCustomHintLine3: '注意：周字段 0=周一、1=周二 …… 6=周日（与标准 crontab 的 0=周日相反）。工作日写作 0-4，周末写作 5,6。',
       cron: {
         manual: '不定时（手动运行）',
         every5Minutes: '每 5 分钟',
@@ -95,6 +96,13 @@ const zhCNExtra = {
         failed: 'AI 生成定时规则失败',
         resultTitle: 'AI 建议的执行时间',
         avoided: '已避开 {count} 个任务的执行时间',
+        frequencyLabel: '执行频率',
+        frequency: {
+          weekly: '每周',
+          every2Days: '每两天',
+          every3Days: '每3天',
+          daily: '每天',
+        },
       },
       accountStrategyLabel: '账号策略',
       fixedAccount: '指定账号',
