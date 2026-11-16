@@ -1,5 +1,6 @@
 from .base import NotificationClient, NotificationMessage
 from .bark_client import BarkClient
+from .feishu_client import FeishuBotClient
 from .gotify_client import GotifyClient
 from .ntfy_client import NtfyClient
 from .telegram_client import TelegramClient
@@ -11,6 +12,7 @@ __all__ = [
     "NotificationClient",
     "NotificationMessage",
     "BarkClient",
+    "FeishuBotClient",
     "GotifyClient",
     "NtfyClient",
     "TelegramClient",

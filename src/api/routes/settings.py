@@ -79,6 +79,8 @@ class NotificationSettingsModel(BaseModel):
     GOTIFY_TOKEN: Optional[str] = None
     BARK_URL: Optional[str] = None
     WX_BOT_URL: Optional[str] = None
+    FEISHU_WEBHOOK_URL: Optional[str] = None
+    FEISHU_SECRET: Optional[str] = None
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
     TELEGRAM_API_BASE_URL: Optional[str] = None

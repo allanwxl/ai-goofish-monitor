@@ -208,6 +208,7 @@ cd web-ui && npm run build
 - `GOTIFY_URL` / `GOTIFY_TOKEN`
 - `BARK_URL`
 - `WX_BOT_URL`
+- `FEISHU_WEBHOOK_URL` / `FEISHU_SECRET`（飞书群自定义机器人，密钥用于签名校验）
 - `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_API_BASE_URL`
 - `WEBHOOK_*`
 

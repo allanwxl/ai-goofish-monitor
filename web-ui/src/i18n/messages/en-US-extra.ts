@@ -256,6 +256,15 @@ const enUSExtra = {
       urlLabel: 'WeCom Bot URL',
       configuredHint: 'Bot URL is already stored.',
     },
+    feishu: {
+      title: 'Feishu Bot',
+      description: 'The custom group bot webhook contains a token and is hidden. Fill in the secret as well when signature verification is enabled on the bot.',
+      urlLabel: 'Feishu Bot Webhook',
+      secretLabel: 'Signing Secret (optional)',
+      configuredHint: 'Bot webhook is already stored.',
+      secretConfiguredHint: 'Signing secret is already stored.',
+      secretOptionalHint: 'Leave empty when signature verification is disabled.',
+    },
     telegram: {
       description: 'The bot token is sensitive, while Chat ID and API base URL can be viewed and updated directly.',
       chatIdPlaceholder: 'Example: 123456789',

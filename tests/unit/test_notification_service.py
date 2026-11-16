@@ -1,8 +1,12 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 
 import pytest
 
 from src.infrastructure.external.notification_clients.base import NotificationClient
+from src.infrastructure.external.notification_clients.feishu_client import FeishuBotClient
 from src.infrastructure.external.notification_clients.pushplus_client import PushPlusClient
 from src.infrastructure.external.notification_clients.webhook_client import WebhookClient
 from src.services.notification_service import NotificationService
@@ -132,4 +136,105 @@ def test_pushplus_client_rejects_business_error_with_http_200(monkeypatch):
     client = PushPlusClient("bad-token", pcurl_to_mobile=False)
 
     with pytest.raises(RuntimeError, match="无效的用户token"):
+        asyncio.run(client.send(_product(), "价格合适"))
+
+
+def test_feishu_client_sends_text_payload(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 0, "msg": "success"}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return _FakeResponse()
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(client.send(_product(), "价格合适"))
+
+    assert captured["url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token"
+    assert captured["json"]["msg_type"] == "text"
+    assert captured["json"]["content"]["text"].startswith("🚨 新推荐! Sony A7M4")
+    assert "价格: 9999" in captured["json"]["content"]["text"]
+    assert "原因: 价格合适" in captured["json"]["content"]["text"]
+    assert "https://www.goofish.com/item/123" in captured["json"]["content"]["text"]
+    # 未配置签名密钥时不下发签名字段
+    assert "timestamp" not in captured["json"]
+    assert "sign" not in captured["json"]
+
+
+def test_feishu_client_signs_payload_when_secret_configured(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"StatusCode": 0, "StatusMessage": "success"}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        "demo-secret",
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(client.send(_product(), "价格合适"))
+
+    timestamp = captured["json"]["timestamp"]
+    expected_sign = base64.b64encode(
+        hmac.new(
+            f"{timestamp}\ndemo-secret".encode("utf-8"),
+            b"",
+            digestmod=hashlib.sha256,
+        ).digest()
+    ).decode("utf-8")
+    assert captured["json"]["sign"] == expected_sign
+    assert timestamp.isdigit()
+
+
+def test_feishu_client_rejects_business_error_with_http_200(monkeypatch):
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 19021, "msg": "sign match fail"}
+
+    monkeypatch.setattr(
+        "requests.post",
+        lambda *args, **kwargs: _FakeResponse(),
+    )
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    with pytest.raises(RuntimeError, match="sign match fail"):
+        asyncio.run(client.send(_product(), "价格合适"))
+
+
+def test_feishu_client_requires_webhook_url():
+    client = FeishuBotClient(pcurl_to_mobile=False)
+
+    assert client.is_enabled() is False
+    with pytest.raises(RuntimeError, match="飞书机器人 未启用"):
         asyncio.run(client.send(_product(), "价格合适"))

@@ -27,6 +27,8 @@ _SETTINGS_ENV_KEYS = [
     "GOTIFY_TOKEN",
     "BARK_URL",
     "WX_BOT_URL",
+    "FEISHU_WEBHOOK_URL",
+    "FEISHU_SECRET",
     "TELEGRAM_BOT_TOKEN",
     "TELEGRAM_CHAT_ID",
     "TELEGRAM_API_BASE_URL",
@@ -319,6 +321,119 @@ def test_notification_test_endpoint_ignores_other_channel_dirty_fields(tmp_path,
     assert payload["results"]["ntfy"]["success"] is True
     assert len(captured) == 1
     assert captured[0]["url"] == "https://ntfy.sh/demo-topic"
+
+
+def test_notification_settings_support_feishu_bot_channel(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+                "FEISHU_SECRET=demo-secret",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+
+    response = client.get("/api/settings/notifications")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["FEISHU_WEBHOOK_URL"] == ""
+    assert payload["FEISHU_SECRET"] == ""
+    assert payload["FEISHU_WEBHOOK_URL_SET"] is True
+    assert payload["FEISHU_SECRET_SET"] is True
+    assert "feishu" in payload["CONFIGURED_CHANNELS"]
+
+    status_response = client.get("/api/settings/status")
+    assert status_response.status_code == 200
+    env_payload = status_response.json()["env_file"]
+    assert env_payload["feishu_webhook_url_set"] is True
+    assert env_payload["feishu_secret_set"] is True
+
+
+def test_update_notification_settings_persists_feishu_bot_config(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+
+    response = client.put(
+        "/api/settings/notifications",
+        json={
+            "FEISHU_WEBHOOK_URL": "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+            "FEISHU_SECRET": "demo-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "feishu" in response.json()["configured_channels"]
+
+    latest = env_file.read_text(encoding="utf-8")
+    assert "FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/demo-token" in latest
+    assert "FEISHU_SECRET=demo-secret" in latest
+
+
+def test_update_notification_settings_rejects_invalid_feishu_webhook(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+
+    response = client.put(
+        "/api/settings/notifications",
+        json={"FEISHU_WEBHOOK_URL": "not-a-url"},
+    )
+
+    assert response.status_code == 422
+    assert "FEISHU_WEBHOOK_URL" in response.text
+
+
+def test_notification_test_endpoint_supports_feishu_channel(tmp_path, monkeypatch):
+    _clear_settings_env(monkeypatch)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/stored-token\n"
+        "FEISHU_SECRET=stored-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(env_manager, "env_file", env_file)
+    client = _build_settings_client()
+
+    captured = {}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 0, "msg": "success"}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    response = client.post(
+        "/api/settings/notifications/test",
+        json={"channel": "feishu", "settings": {}},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["results"]["feishu"]["success"] is True
+    assert captured["url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/stored-token"
+    assert captured["json"]["msg_type"] == "text"
+    assert captured["json"]["sign"]
 
 
 def test_ai_settings_fall_back_to_runtime_environment_when_env_file_missing(tmp_path, monkeypatch):
