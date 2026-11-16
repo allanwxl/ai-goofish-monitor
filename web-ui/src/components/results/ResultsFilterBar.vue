@@ -25,6 +25,7 @@ interface Props {
   aiRecommendedOnly: boolean
   keywordRecommendedOnly: boolean
   includeHidden: boolean
+  listingStatus: string[]
   sortBy: 'crawl_time' | 'publish_time' | 'price' | 'keyword_hit_count'
   sortOrder: 'asc' | 'desc'
   isLoading: boolean
@@ -68,6 +69,7 @@ const emit = defineEmits<{
   (e: 'update:aiRecommendedOnly', value: boolean): void
   (e: 'update:keywordRecommendedOnly', value: boolean): void
   (e: 'update:includeHidden', value: boolean): void
+  (e: 'update:listingStatus', value: string[]): void
   (e: 'update:sortBy', value: 'crawl_time' | 'publish_time' | 'price' | 'keyword_hit_count'): void
   (e: 'update:sortOrder', value: 'asc' | 'desc'): void
   (e: 'refresh'): void
@@ -75,6 +77,24 @@ const emit = defineEmits<{
   (e: 'delete'): void
   (e: 'manage-blacklist'): void
 }>()
+
+const listingStatusOptions = [
+  { value: 'active', labelKey: 'results.status.active' },
+  { value: 'sold', labelKey: 'results.status.sold' },
+  { value: 'delisted', labelKey: 'results.status.delisted' },
+  { value: 'unknown', labelKey: 'results.status.unknown' },
+] as const
+
+function isListingStatusChecked(value: string) {
+  return props.listingStatus.includes(value)
+}
+
+function toggleListingStatus(value: string) {
+  const next = isListingStatusChecked(value)
+    ? props.listingStatus.filter((item) => item !== value)
+    : [...props.listingStatus, value]
+  emit('update:listingStatus', next)
+}
 
 function handleToggleAiRecommended(value: boolean) {
   emit('update:aiRecommendedOnly', value)
@@ -175,6 +195,24 @@ function handleToggleKeywordRecommended(value: boolean) {
             @update:modelValue="(value) => emit('update:includeHidden', value === true)"
           />
           <Label for="include-hidden" class="cursor-pointer">{{ t('results.filters.includeHidden') }}</Label>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span class="text-xs font-semibold text-slate-500">{{ t('results.filters.listingStatus') }}</span>
+        <div
+          v-for="option in listingStatusOptions"
+          :key="option.value"
+          class="flex items-center space-x-2"
+        >
+          <Checkbox
+            :id="`listing-status-${option.value}`"
+            :model-value="isListingStatusChecked(option.value)"
+            @update:modelValue="() => toggleListingStatus(option.value)"
+          />
+          <Label :for="`listing-status-${option.value}`" class="cursor-pointer">
+            {{ t(option.labelKey) }}
+          </Label>
         </div>
       </div>
 

@@ -1,7 +1,7 @@
 import { useAuth } from '@/composables/useAuth'
 
 interface FetchOptions extends RequestInit {
-  params?: Record<string, string | number | boolean | undefined>;
+  params?: Record<string, string | number | boolean | (string | number)[] | undefined>;
 }
 
 /**
@@ -40,9 +40,13 @@ export async function http(url: string, options: FetchOptions = {}) {
   if (options.params) {
     const searchParams = new URLSearchParams()
     Object.entries(options.params).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) {
-        searchParams.append(key, String(value))
+      if (value === undefined || value === null) return
+      // 数组用重复键传参，对应后端的 list[str] 查询参数
+      if (Array.isArray(value)) {
+        value.forEach((entry) => searchParams.append(key, String(entry)))
+        return
       }
+      searchParams.append(key, String(value))
     })
     const queryString = searchParams.toString()
     if (queryString) {

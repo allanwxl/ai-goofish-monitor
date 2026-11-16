@@ -58,5 +58,13 @@ def test_save_to_jsonl(tmp_path, monkeypatch):
         "_matched_blacklist_keywords": [],
         "_hidden_reason": None,
         "_effective_hidden": False,
+        "_listing_status": "unknown",
+        "_sold_price": None,
+        "_sold_price_display": "",
+        "_sold_price_source": "",
+        "_sold_at": None,
+        "_status_checked_at": None,
+        "_status_source": "",
+        "_status_raw_code": None,
     }
     assert records == [expected]

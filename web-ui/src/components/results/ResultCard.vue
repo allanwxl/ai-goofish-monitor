@@ -49,11 +49,39 @@ const hiddenLabel = computed(() => {
   return t('results.card.hidden')
 })
 
+// 商品在闲鱼上的在售状态，与 _status（可见性）互不影响：已售/已下架仍然显示。
+const listingStatus = computed(() => props.item._listing_status || 'unknown')
+const statusMeta = computed(() => {
+  switch (listingStatus.value) {
+    case 'active':
+      return { label: t('results.status.active'), badge: 'bg-emerald-500/90' }
+    case 'sold':
+      return { label: t('results.status.sold'), badge: 'bg-rose-500/90' }
+    case 'delisted':
+      return { label: t('results.status.delisted'), badge: 'bg-slate-600/90' }
+    default:
+      return { label: t('results.status.unknown'), badge: 'bg-amber-500/90' }
+  }
+})
+const isTerminated = computed(() => listingStatus.value === 'sold' || listingStatus.value === 'delisted')
+const isSoldPriceEstimated = computed(
+  () => listingStatus.value === 'sold' && props.item._sold_price_source === 'listing_fallback'
+)
+const soldPriceText = computed(() => {
+  if (listingStatus.value !== 'sold' || props.item._sold_price === null || props.item._sold_price === undefined) {
+    return ''
+  }
+  if (isSoldPriceEstimated.value) {
+    return t('results.card.soldPriceEstimated', { price: props.item._sold_price })
+  }
+  return props.item._sold_price_display || `¥${props.item._sold_price}`
+})
+
 const expanded = ref(false)
 </script>
 
 <template>
-  <Card class="group flex flex-col h-full border-none shadow-glass hover:shadow-card-hover transition-all duration-300 rounded-2xl overflow-hidden bg-white/80 backdrop-blur-sm" :class="{ 'opacity-50': isHidden }">
+  <Card class="group flex flex-col h-full border-none shadow-glass hover:shadow-card-hover transition-all duration-300 rounded-2xl overflow-hidden bg-white/80 backdrop-blur-sm" :class="{ 'opacity-50': isHidden, 'saturate-50': isTerminated && !isHidden }">
     <!-- Image Header -->
     <div class="relative aspect-[4/3] overflow-hidden">
       <div class="absolute inset-0 bg-slate-200 animate-pulse" v-if="!imageUrl"></div>
@@ -75,6 +103,14 @@ const expanded = ref(false)
         </Badge>
         <Badge v-if="isRuleHidden" variant="secondary" class="bg-slate-900/75 text-white border-none backdrop-blur-md shadow-sm">
           {{ t('results.card.blacklisted') }}
+        </Badge>
+        <Badge
+          v-if="listingStatus !== 'unknown'"
+          variant="secondary"
+          class="backdrop-blur-md border-none shadow-sm text-white"
+          :class="statusMeta.badge"
+        >
+          {{ statusMeta.label }}
         </Badge>
       </div>
       <div class="absolute top-3 right-3 flex gap-1.5">
@@ -149,6 +185,19 @@ const expanded = ref(false)
           {{ expanded ? t('results.card.collapse') : t('results.card.expand') }}
           <Info class="w-3 h-3" />
         </button>
+      </div>
+
+      <!-- Sold Price -->
+      <div v-if="soldPriceText" class="mt-4 rounded-xl border border-rose-100 bg-rose-50/70 px-3 py-2">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-[10px] font-medium uppercase tracking-wider text-rose-400">
+            {{ t('results.card.soldPrice') }}
+          </span>
+          <span class="text-sm font-bold text-rose-600">{{ soldPriceText }}</span>
+        </div>
+        <p v-if="isSoldPriceEstimated" class="mt-1 text-[10px] text-rose-400">
+          {{ t('results.card.soldPriceEstimatedHint') }}
+        </p>
       </div>
 
       <!-- Price Stats Grid -->

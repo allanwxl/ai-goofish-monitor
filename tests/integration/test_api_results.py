@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api.routes import results
+from src.services.item_status_service import apply_listing_status, parse_listing_status
 from src.services.price_history_service import record_market_snapshots
 
 
@@ -414,3 +415,220 @@ def test_results_blacklist_rules_hide_items_from_view_and_insights(tmp_path, mon
     assert download_resp.status_code == 200
     assert "MacBook Air Intel i5 8+256" in download_resp.text
     assert "MacBook Pro Intel 13寸" in download_resp.text
+
+
+def _listing_detail(item_status=1, sold_cnt=0, sold_price=""):
+    item_do = {"itemStatus": item_status, "soldCnt": sold_cnt}
+    if sold_price:
+        item_do["soldPrice"] = sold_price
+    return {"ret": ["SUCCESS::调用成功"], "data": {"itemDO": item_do}}
+
+
+def test_results_expose_listing_status_and_sold_price(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    target_file = jsonl_dir / "demo_full_data.jsonl"
+
+    records = [
+        {
+            "爬取时间": "2026-01-02T09:00:00",
+            "搜索关键字": "demo",
+            "任务名称": "Demo 任务",
+            "商品信息": {
+                "商品ID": "1001",
+                "商品标题": "Demo One",
+                "商品链接": "https://www.goofish.com/item?id=1001",
+                "当前售价": "¥950",
+                "发布时间": "2026-01-02 08:30",
+            },
+            "卖家信息": {"卖家昵称": "卖家A"},
+            "ai_analysis": {
+                "analysis_source": "ai",
+                "is_recommended": True,
+                "reason": "价格低于近期均价",
+            },
+        },
+        {
+            "爬取时间": "2026-01-02T09:05:00",
+            "搜索关键字": "demo",
+            "任务名称": "Demo 任务",
+            "商品信息": {
+                "商品ID": "1002",
+                "商品标题": "Demo Two",
+                "商品链接": "https://www.goofish.com/item?id=1002",
+                "当前售价": "¥1200",
+                "发布时间": "2026-01-02 08:45",
+            },
+            "卖家信息": {"卖家昵称": "卖家B"},
+            "ai_analysis": {
+                "analysis_source": "keyword",
+                "is_recommended": False,
+                "reason": "未命中",
+                "keyword_hit_count": 0,
+            },
+        },
+    ]
+    _write_jsonl(target_file, records)
+
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1001",
+        parse_listing_status(_listing_detail(sold_cnt=1, sold_price="900")),
+        detected_at="2026-01-03T10:00:00",
+    )
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1002",
+        parse_listing_status(_listing_detail(item_status=-98)),
+        detected_at="2026-01-03T10:00:00",
+    )
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    list_resp = client.get("/api/results/demo_full_data.jsonl")
+    assert list_resp.status_code == 200
+    items = list_resp.json()["items"]
+    by_id = {item["商品信息"]["商品ID"]: item for item in items}
+    assert by_id["1001"]["_listing_status"] == "sold"
+    assert by_id["1001"]["_sold_price"] == 900.0
+    assert by_id["1001"]["_sold_price_source"] == "sold_price_api"
+    assert by_id["1001"]["_status_checked_at"] == "2026-01-03T10:00:00"
+    assert by_id["1002"]["_listing_status"] == "delisted"
+    assert by_id["1002"]["_sold_price"] is None
+
+    # 已售 / 已下架的记录仍然保留显示，不被可见性状态过滤掉
+    assert list_resp.json()["total_items"] == 2
+
+    sold_only = client.get(
+        "/api/results/demo_full_data.jsonl", params={"listing_status": "sold"}
+    )
+    assert sold_only.status_code == 200
+    sold_payload = sold_only.json()
+    assert sold_payload["total_items"] == 1
+    assert sold_payload["items"][0]["商品信息"]["商品ID"] == "1001"
+
+    delisted_only = client.get(
+        "/api/results/demo_full_data.jsonl", params={"listing_status": "delisted"}
+    )
+    assert delisted_only.status_code == 200
+    assert delisted_only.json()["total_items"] == 1
+
+    insights_resp = client.get("/api/results/demo_full_data.jsonl/insights")
+    assert insights_resp.status_code == 200
+    insights = insights_resp.json()
+    assert insights["sold_summary"]["sold_count"] == 1
+    assert insights["sold_summary"]["delisted_count"] == 1
+    assert insights["sold_trend"][0]["day"] == "2026-01-03"
+    assert insights["sold_trend"][0]["sold_count"] == 1
+    assert insights["sold_trend"][0]["avg_price"] == 900.0
+
+    export_resp = client.get("/api/results/demo_full_data.jsonl/export")
+    assert export_resp.status_code == 200
+    text = export_resp.text
+    assert "商品状态,成交价,成交价口径,状态判定时间" in text
+    assert "已售" in text
+    assert "已下架" in text
+
+
+def test_manual_hide_does_not_change_listing_status(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    target_file = jsonl_dir / "demo_full_data.jsonl"
+
+    records = [
+        {
+            "爬取时间": "2026-01-02T09:00:00",
+            "搜索关键字": "demo",
+            "任务名称": "Demo 任务",
+            "商品信息": {
+                "商品ID": "1001",
+                "商品标题": "Demo One",
+                "商品链接": "https://www.goofish.com/item?id=1001",
+                "当前售价": "¥950",
+                "发布时间": "2026-01-02 08:30",
+            },
+            "卖家信息": {"卖家昵称": "卖家A"},
+            "ai_analysis": {
+                "analysis_source": "ai",
+                "is_recommended": True,
+                "reason": "ok",
+            },
+        }
+    ]
+    _write_jsonl(target_file, records)
+
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1001",
+        parse_listing_status(_listing_detail(sold_cnt=1, sold_price="900")),
+        detected_at="2026-01-03T10:00:00",
+    )
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    hide_resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/status",
+        json={"status": "hidden"},
+    )
+    assert hide_resp.status_code == 200
+
+    hidden_resp = client.get(
+        "/api/results/demo_full_data.jsonl", params={"include_hidden": True}
+    )
+    assert hidden_resp.status_code == 200
+    item = hidden_resp.json()["items"][0]
+    # 手动屏蔽只影响可见性，在售状态与成交价保持不变
+    assert item["_status"] == "hidden"
+    assert item["_listing_status"] == "sold"
+    assert item["_sold_price"] == 900.0
+
+    visible_resp = client.get("/api/results/demo_full_data.jsonl")
+    assert visible_resp.status_code == 200
+    assert visible_resp.json()["total_items"] == 0
+
+
+def test_manual_status_check_is_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ITEM_STATUS_MANUAL_CHECK_ENABLED", raising=False)
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-check")
+    assert resp.status_code == 403
+    assert "ITEM_STATUS_MANUAL_CHECK_ENABLED" in resp.json()["detail"]
+
+
+def test_manual_status_check_starts_background_job_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_MANUAL_CHECK_ENABLED", "true")
+    calls: dict = {}
+
+    async def fake_run(*, keyword, result_filename, run_id=None):
+        calls["keyword"] = keyword
+        calls["result_filename"] = result_filename
+        return {"checked": 1, "sold": 0, "delisted": 0, "failed": 0}
+
+    monkeypatch.setattr(results, "run_standalone_status_check", fake_run)
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-check")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["filename"] == "demo_full_data.jsonl"
+    assert payload["keyword"] == "demo"
+
+    # 再发一次请求，给事件循环机会把后台任务跑完
+    client.get("/api/results/demo_full_data.jsonl")
+    assert calls.get("keyword") == "demo"
+    assert calls.get("result_filename") == "demo_full_data.jsonl"

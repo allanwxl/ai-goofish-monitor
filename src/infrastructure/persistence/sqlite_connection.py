@@ -65,8 +65,33 @@ SCHEMA_STATEMENTS = (
         analysis_source TEXT,
         keyword_hit_count INTEGER NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
+        listing_status TEXT NOT NULL DEFAULT 'unknown',
+        sold_price REAL,
+        sold_price_display TEXT,
+        sold_price_source TEXT,
+        sold_at TEXT,
+        status_checked_at TEXT,
+        status_source TEXT,
+        status_raw_code INTEGER,
+        delisted_streak INTEGER NOT NULL DEFAULT 0,
         raw_json TEXT NOT NULL,
         UNIQUE(result_filename, link_unique_key)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS item_status_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_filename TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        price REAL,
+        price_display TEXT,
+        price_source TEXT,
+        status_raw_code INTEGER,
+        detected_at TEXT NOT NULL,
+        run_id TEXT,
+        detail_json TEXT
     )
     """,
     """
@@ -122,6 +147,29 @@ SCHEMA_STATEMENTS = (
     CREATE INDEX IF NOT EXISTS idx_snapshots_keyword_item_time
     ON price_snapshots(keyword_slug, item_id, snapshot_time DESC)
     """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_status_events_filename_item
+    ON item_status_events(result_filename, item_id, detected_at DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_status_events_filename_day
+    ON item_status_events(result_filename, detected_at DESC)
+    """,
+)
+
+
+# result_items 的商品在售状态列。列名与 DDL 都是模块内固定的常量，
+# 不是用户输入，拼进 ALTER TABLE 是安全的。
+LISTING_STATUS_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("listing_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+    ("sold_price", "REAL"),
+    ("sold_price_display", "TEXT"),
+    ("sold_price_source", "TEXT"),
+    ("sold_at", "TEXT"),
+    ("status_checked_at", "TEXT"),
+    ("status_source", "TEXT"),
+    ("status_raw_code", "INTEGER"),
+    ("delisted_streak", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -143,6 +191,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
     _migrate_result_items_status(conn)
+    _migrate_result_items_listing_status(conn)
     conn.commit()
 
 
@@ -164,6 +213,32 @@ def _migrate_result_items_status(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_results_filename_status_crawl"
         " ON result_items(result_filename, status, crawl_time DESC)"
+    )
+
+
+def _migrate_result_items_listing_status(conn: sqlite3.Connection) -> None:
+    """为 result_items 表添加商品在售状态相关列。
+
+    ``status`` 列表示记录的可见性（active/hidden/expired），
+    而这里新增的 ``listing_status`` 表示商品在闲鱼上的真实状态
+    （active/sold/delisted/unknown）。两者语义不同，不能合并。
+
+    每次启动都检查并补齐缺失的列，而不是「跑一次就打标记」：
+    否则后续再加字段时，已经迁移过的库永远补不上新列。
+    """
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(result_items)").fetchall()]
+    for column_name, column_ddl in LISTING_STATUS_COLUMNS:
+        if column_name not in cols:
+            conn.execute(
+                f"ALTER TABLE result_items ADD COLUMN {column_name} {column_ddl}"
+            )
+    conn.execute(
+        "INSERT OR REPLACE INTO app_metadata(key, value)"
+        " VALUES ('migration:result_items_listing_status', 'done')"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_results_filename_listing_status"
+        " ON result_items(result_filename, listing_status, crawl_time DESC)"
     )
 
 

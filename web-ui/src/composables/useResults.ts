@@ -35,6 +35,7 @@ export function useResults() {
       ai_recommended_only: false,
       keyword_recommended_only: false,
       include_hidden: false,
+      listing_status: [],
       sort_by: 'crawl_time',
       sort_order: 'desc',
     }

@@ -6,6 +6,7 @@ export interface GetResultContentParams {
   ai_recommended_only?: boolean;
   keyword_recommended_only?: boolean;
   include_hidden?: boolean;
+  listing_status?: string[];
   sort_by?: 'crawl_time' | 'publish_time' | 'price' | 'keyword_hit_count';
   sort_order?: 'asc' | 'desc';
   page?: number;
@@ -47,9 +48,12 @@ export async function updateResultBlacklistRules(filename: string, keywords: str
 export function buildResultExportUrl(filename: string, params: GetResultContentParams = {}): string {
   const searchParams = new URLSearchParams()
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      searchParams.set(key, String(value))
+    if (value === undefined || value === null) return
+    if (Array.isArray(value)) {
+      value.forEach((entry) => searchParams.append(key, String(entry)))
+      return
     }
+    searchParams.set(key, String(value))
   })
   const queryString = searchParams.toString()
   return `/api/results/${encodeURIComponent(filename)}/export${queryString ? `?${queryString}` : ''}`

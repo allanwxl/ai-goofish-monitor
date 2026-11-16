@@ -1,6 +1,8 @@
 """
 结果文件管理路由
 """
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from enum import Enum
@@ -9,6 +11,11 @@ from pydantic import BaseModel
 from urllib.parse import quote
 
 from src.services.price_history_service import build_price_history_insights
+from src.services.item_status_service import build_sold_status_insights
+from src.services.item_status_task_runner import (
+    is_manual_status_check_enabled,
+    run_standalone_status_check,
+)
 from src.services.result_export_service import build_results_csv
 from src.services.result_file_service import (
     enrich_records_with_price_insight,
@@ -31,6 +38,9 @@ from src.services.result_storage_service import (
 router = APIRouter(prefix="/api/results", tags=["results"])
 
 DEFAULT_EXPORT_FILENAME = "export.csv"
+
+# 手动状态复核的后台任务句柄（防止被垃圾回收）
+_STATUS_CHECK_TASKS: set[asyncio.Task] = set()
 
 
 def _build_download_headers(export_name: str) -> dict[str, str]:
@@ -88,6 +98,7 @@ async def get_result_file_content(
     ai_recommended_only: bool = Query(False),
     keyword_recommended_only: bool = Query(False),
     include_hidden: bool = Query(False),
+    listing_status: list[str] = Query(default=[]),
     sort_by: str = Query("crawl_time"),
     sort_order: str = Query("desc"),
 ):
@@ -109,6 +120,7 @@ async def get_result_file_content(
             page=page,
             limit=limit,
             include_hidden=include_hidden,
+            listing_status=listing_status,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -132,7 +144,9 @@ async def get_result_file_insights(filename: str):
         validate_result_filename(filename)
         keyword = filename.replace("_full_data.jsonl", "")
         visible_item_ids = load_visible_result_item_ids(filename)
-        return build_price_history_insights(keyword, visible_item_ids=visible_item_ids)
+        insights = build_price_history_insights(keyword, visible_item_ids=visible_item_ids)
+        insights.update(build_sold_status_insights(filename))
+        return insights
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -144,6 +158,7 @@ async def export_result_file_content(
     ai_recommended_only: bool = Query(False),
     keyword_recommended_only: bool = Query(False),
     include_hidden: bool = Query(False),
+    listing_status: list[str] = Query(default=[]),
     sort_by: str = Query("crawl_time"),
     sort_order: str = Query("desc"),
 ):
@@ -161,6 +176,7 @@ async def export_result_file_content(
             sort_by=sort_by,
             sort_order=sort_order,
             include_hidden=include_hidden,
+            listing_status=listing_status,
         )
         csv_text = build_results_csv(
             enrich_records_with_price_insight(results, filename)
@@ -202,6 +218,42 @@ async def patch_item_status(filename: str, item_id: str, body: UpdateStatusReque
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"message": "状态已更新", "status": body.status.value}
+
+
+@router.post("/{filename}/status-check")
+async def trigger_status_check(filename: str):
+    """手动触发一次商品状态复核（已售 / 已下架）。
+
+    默认关闭：需要显式设置 ``ITEM_STATUS_MANUAL_CHECK_ENABLED=true``。
+    这个接口会在 Web 服务进程里新开一个浏览器并向闲鱼发请求，
+    而后端 API 目前没有鉴权中间件，请在受信网络内使用。
+    """
+    if not is_manual_status_check_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="手动状态复核未启用，如需使用请设置 ITEM_STATUS_MANUAL_CHECK_ENABLED=true。",
+        )
+    try:
+        validate_result_filename(filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    keyword = filename.replace("_full_data.jsonl", "")
+    task = asyncio.create_task(
+        run_standalone_status_check(
+            keyword=keyword,
+            result_filename=filename,
+        )
+    )
+    # 任务句柄要留一份强引用，否则可能被垃圾回收掉
+    _STATUS_CHECK_TASKS.add(task)
+    task.add_done_callback(_STATUS_CHECK_TASKS.discard)
+
+    return {
+        "message": "状态复核已启动，完成后刷新结果页即可看到最新状态。",
+        "filename": filename,
+        "keyword": keyword,
+    }
 
 
 @router.get("/{filename}/blacklist-rules")

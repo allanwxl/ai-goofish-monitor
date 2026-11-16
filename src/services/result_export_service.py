@@ -22,8 +22,24 @@ EXPORT_HEADERS = [
     "市场均价",
     "性价比分数",
     "性价比标签",
+    "商品状态",
+    "成交价",
+    "成交价口径",
+    "状态判定时间",
     "商品链接",
 ]
+
+LISTING_STATUS_LABELS = {
+    "active": "在售",
+    "sold": "已售",
+    "delisted": "已下架",
+    "unknown": "未知",
+}
+
+SOLD_PRICE_SOURCE_LABELS = {
+    "sold_price_api": "平台成交价",
+    "listing_fallback": "挂牌价估算",
+}
 
 
 def build_results_csv(records: list[dict]) -> str:
@@ -36,6 +52,9 @@ def build_results_csv(records: list[dict]) -> str:
         seller = record.get("卖家信息", {}) or {}
         ai_analysis = record.get("ai_analysis", {}) or {}
         price_insight = record.get("price_insight", {}) or {}
+        listing_status = str(record.get("_listing_status") or "unknown")
+        sold_price = record.get("_sold_price")
+        sold_price_source = str(record.get("_sold_price_source") or "")
         writer.writerow(
             {
                 "任务名称": record.get("任务名称", ""),
@@ -54,6 +73,10 @@ def build_results_csv(records: list[dict]) -> str:
                 "市场均价": price_insight.get("market_avg_price", ""),
                 "性价比分数": ai_analysis.get("value_score", price_insight.get("deal_score", "")),
                 "性价比标签": ai_analysis.get("value_summary", price_insight.get("deal_label", "")),
+                "商品状态": LISTING_STATUS_LABELS.get(listing_status, listing_status),
+                "成交价": "" if sold_price is None else sold_price,
+                "成交价口径": SOLD_PRICE_SOURCE_LABELS.get(sold_price_source, ""),
+                "状态判定时间": record.get("_status_checked_at") or "",
                 "商品链接": item.get("商品链接", ""),
             }
         )

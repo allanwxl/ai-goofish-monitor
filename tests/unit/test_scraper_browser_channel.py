@@ -28,7 +28,7 @@ def test_resolve_browser_channel_uses_msedge_locally_when_requested(monkeypatch)
 
 
 def test_chromium_launch_args_disable_crashpad_and_pin_dump_dir():
-    from src.scraper import build_chromium_launch_args
+    from src.services.browser_session import build_chromium_launch_args
 
     args = build_chromium_launch_args("/tmp/chromium-crashpad")
 

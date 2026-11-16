@@ -146,6 +146,7 @@ async function handleSaveBlacklistRules() {
       v-model:aiRecommendedOnly="filters.ai_recommended_only"
       v-model:keywordRecommendedOnly="filters.keyword_recommended_only"
       v-model:includeHidden="filters.include_hidden"
+      v-model:listingStatus="filters.listing_status"
       v-model:sortBy="filters.sort_by"
       v-model:sortOrder="filters.sort_order"
       :is-loading="isLoading"

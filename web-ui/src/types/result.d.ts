@@ -65,6 +65,29 @@ export interface PriceInsight {
   last_seen_at?: string | null;
 }
 
+export interface SoldTrendPoint {
+  day: string;
+  sold_count: number;
+  avg_price: number | null;
+  median_price: number | null;
+  min_price: number | null;
+  max_price: number | null;
+  estimated_count: number;
+}
+
+export interface SoldSummary {
+  active_count: number;
+  sold_count: number;
+  delisted_count: number;
+  unknown_count: number;
+  sold_avg_price: number | null;
+  sold_median_price: number | null;
+  sold_min_price: number | null;
+  sold_max_price: number | null;
+  estimated_count: number;
+  last_sold_at?: string | null;
+}
+
 export interface ResultInsights {
   market_summary: {
     sample_count: number;
@@ -90,6 +113,8 @@ export interface ResultInsights {
     min_price: number | null;
     max_price: number | null;
   }>;
+  sold_summary?: SoldSummary;
+  sold_trend?: SoldTrendPoint[];
   latest_snapshot_at?: string | null;
 }
 
@@ -105,4 +130,13 @@ export interface ResultItem {
   _effective_hidden?: boolean;
   _hidden_reason?: 'manual' | 'rule' | 'expired' | null;
   _matched_blacklist_keywords?: string[];
+  /** 商品在闲鱼上的在售状态，与 _status（可见性）无关 */
+  _listing_status?: 'active' | 'sold' | 'delisted' | 'unknown';
+  _sold_price?: number | null;
+  _sold_price_display?: string;
+  _sold_price_source?: 'sold_price_api' | 'listing_fallback' | '';
+  _sold_at?: string | null;
+  _status_checked_at?: string | null;
+  _status_source?: string;
+  _status_raw_code?: number | null;
 }

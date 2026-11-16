@@ -3,7 +3,6 @@ import json
 import os
 import random
 import re
-import tempfile
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlencode
@@ -24,7 +23,6 @@ from src.config import (
     AI_DEBUG_MODE,
     DETAIL_API_URL_PATTERN,
     LOGIN_IS_EDGE,
-    RUN_HEADLESS,
     RUNNING_IN_DOCKER,
     SKIP_AI_ANALYSIS,
     STATE_FILE,
@@ -47,10 +45,15 @@ from src.utils import (
 from src.rotation import RotationPool, load_state_files, parse_proxy_pool, RotationItem, can_rotate_after_failure
 from src.failure_guard import FailureGuard
 from src.services.account_strategy_service import resolve_account_runtime_plan
+from src.services.browser_session import create_logged_in_context
 from src.infrastructure.persistence.storage_names import build_result_filename
 from src.services.item_analysis_dispatcher import (
     ItemAnalysisDispatcher,
     ItemAnalysisJob,
+)
+from src.services.item_status_rechecker import (
+    get_status_check_settings,
+    run_status_recheck,
 )
 from src.services.price_history_service import (
     build_market_reference,
@@ -111,33 +114,6 @@ REGION_COLUMN_SELECTOR = ":scope > div"
 REGION_OPTION_SELECTOR = "[class*='provItem']:visible"
 REGION_SUBMIT_SELECTOR = "[class*='searchBtn']:visible"
 REGION_SUBMIT_TEXT = re.compile(r"查看(?:\d+|999\+)件宝贝")
-CHROMIUM_CRASH_DUMPS_DIRNAME = "chromium-crashpad"
-
-
-def build_chromium_launch_args(crash_dumps_dir: str) -> list[str]:
-    """Chromium 启动参数。
-
-    Docker 里的 Playwright Chromium 会拉起 chrome_crashpad_handler。数据库路径一旦落到
-    ``/``，handler 会自监控重启并占住大量内存。这里禁用 crash reporter，同时把 dump
-    目录固定到可写临时目录。
-    """
-    return [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-web-security",
-        "--disable-breakpad",
-        "--disable-crash-reporter",
-        "--disable-features=IsolateOrigins,site-per-process,Crashpad",
-        f"--crash-dumps-dir={crash_dumps_dir}",
-    ]
-
-
-def prepare_chromium_launch_args() -> list[str]:
-    crash_dumps_dir = os.path.join(tempfile.gettempdir(), CHROMIUM_CRASH_DUMPS_DIRNAME)
-    os.makedirs(crash_dumps_dir, exist_ok=True)
-    return build_chromium_launch_args(crash_dumps_dir)
 
 
 def _format_failure_reason(reason: str, limit: int = 500) -> str:
@@ -284,121 +260,6 @@ def _get_seller_profile_cache_ttl(task_config: dict) -> int:
     return max(0, _as_int(configured, default))
 
 
-def _default_context_options() -> dict:
-    return {
-        "user_agent": "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-        "viewport": {"width": 412, "height": 915},
-        "device_scale_factor": 2.625,
-        "is_mobile": True,
-        "has_touch": True,
-        "locale": "zh-CN",
-        "timezone_id": "Asia/Shanghai",
-        "permissions": ["geolocation"],
-        "geolocation": {"longitude": 121.4737, "latitude": 31.2304},
-        "color_scheme": "light",
-    }
-
-
-def _clean_kwargs(options: dict) -> dict:
-    return {k: v for k, v in options.items() if v is not None}
-
-
-def _looks_like_mobile(ua: str) -> Optional[bool]:
-    if not ua:
-        return None
-    ua_lower = ua.lower()
-    if "mobile" in ua_lower or "android" in ua_lower or "iphone" in ua_lower:
-        return True
-    if "windows" in ua_lower or "macintosh" in ua_lower:
-        return False
-    return None
-
-
-def _build_context_overrides(snapshot: dict) -> dict:
-    env = snapshot.get("env") or {}
-    headers = snapshot.get("headers") or {}
-    navigator = env.get("navigator") or {}
-    screen = env.get("screen") or {}
-    intl = env.get("intl") or {}
-
-    overrides = {}
-
-    ua = (
-        headers.get("User-Agent")
-        or headers.get("user-agent")
-        or navigator.get("userAgent")
-    )
-    if ua:
-        overrides["user_agent"] = ua
-
-    accept_language = headers.get("Accept-Language") or headers.get("accept-language")
-    locale = None
-    if accept_language:
-        locale = accept_language.split(",")[0].strip()
-    elif navigator.get("language"):
-        locale = navigator["language"]
-    if locale:
-        overrides["locale"] = locale
-
-    tz = intl.get("timeZone")
-    if tz:
-        overrides["timezone_id"] = tz
-
-    width = screen.get("width")
-    height = screen.get("height")
-    if isinstance(width, (int, float)) and isinstance(height, (int, float)):
-        overrides["viewport"] = {"width": int(width), "height": int(height)}
-
-    dpr = screen.get("devicePixelRatio")
-    if isinstance(dpr, (int, float)):
-        overrides["device_scale_factor"] = float(dpr)
-
-    touch_points = navigator.get("maxTouchPoints")
-    if isinstance(touch_points, (int, float)):
-        overrides["has_touch"] = touch_points > 0
-
-    mobile_flag = _looks_like_mobile(ua or "")
-    if mobile_flag is not None:
-        overrides["is_mobile"] = mobile_flag
-
-    return _clean_kwargs(overrides)
-
-
-# 这些头由浏览器按请求类型生成。扩展快照里常见的是某次 XHR 的值
-# （Sec-Fetch-Dest: empty / Sec-Fetch-Mode: cors / Accept: */*）。
-# 如果原样套到 BrowserContext，文档和脚本请求会被改成 CORS 空请求，搜索页只剩白屏。
-_BROWSER_MANAGED_EXTRA_HEADERS = {
-    "accept",
-    "accept-encoding",
-    "authorization",
-    "connection",
-    "content-length",
-    "content-type",
-    "cookie",
-    "host",
-    "origin",
-    "proxy-authorization",
-    "referer",
-    "sec-fetch-dest",
-    "sec-fetch-mode",
-    "sec-fetch-site",
-    "sec-fetch-user",
-    "upgrade-insecure-requests",
-    "user-agent",
-}
-
-
-def _build_extra_headers(raw_headers: Optional[dict]) -> dict:
-    if not raw_headers:
-        return {}
-    headers = {}
-    for key, value in raw_headers.items():
-        if not key or key.lower() in _BROWSER_MANAGED_EXTRA_HEADERS or value is None:
-            continue
-        headers[key] = value
-    return headers
-
-
 LOGIN_MODAL_SELECTOR = "div[class*='login-modal-wrap']"
 LOGIN_MODAL_CLOSE_SELECTORS = (
     "div[class*='login-modal-wrap'] div[class*='closeIconBg']",
@@ -436,6 +297,64 @@ async def _dismiss_login_modal(page) -> bool:
 
     print("      [登录弹窗] 未能关闭登录弹窗。")
     return False
+
+
+async def fetch_item_detail(
+    context,
+    url: str,
+    *,
+    timeout_ms: int = 25000,
+) -> Optional[dict]:
+    """打开商品详情页，返回详情接口的原始 JSON。
+
+    商品已下架或被删除时接口依然会返回，只是 ``data.itemDO`` 为空，
+    状态判定交给上层（本仓库按 itemStatus / soldCnt / soldPrice 判断）。
+
+    触发闲鱼反爬验证时抛 :class:`RiskControlError`。
+    """
+    detail_page = await context.new_page()
+    try:
+        async with detail_page.expect_response(
+            lambda r: DETAIL_API_URL_PATTERN in r.url, timeout=timeout_ms
+        ) as detail_info:
+            await detail_page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+
+        detail_response = await detail_info.value
+        if not detail_response.ok:
+            print(
+                f"   错误: 获取商品详情API响应失败，状态码: {detail_response.status}"
+            )
+            if AI_DEBUG_MODE:
+                print(f"--- [DETAIL DEBUG] FAILED RESPONSE from {url} ---")
+                try:
+                    print(await detail_response.text())
+                except Exception as exc:
+                    print(f"无法读取响应内容: {exc}")
+                print("----------------------------------------------------")
+            return None
+
+        detail_json = await detail_response.json()
+        ret_string = str(await safe_get(detail_json, "ret", default=[]))
+        if "FAIL_SYS_USER_VALIDATE" in ret_string:
+            print(
+                "\n==================== CRITICAL BLOCK DETECTED ===================="
+            )
+            print("检测到闲鱼反爬虫验证 (FAIL_SYS_USER_VALIDATE)，程序将终止。")
+            long_sleep_duration = random.randint(3, 60)
+            print(
+                f"为避免账户风险，将执行一次长时间休眠 ({long_sleep_duration} 秒) 后再退出..."
+            )
+            await asyncio.sleep(long_sleep_duration)
+            print("长时间休眠结束，现在将安全退出。")
+            print("===================================================================")
+            raise RiskControlError("FAIL_SYS_USER_VALIDATE")
+        return detail_json
+    finally:
+        await detail_page.close()
 
 
 async def scrape_user_profile(context, user_id: str) -> dict:
@@ -664,50 +583,14 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
         processed_item_count = 0
         stop_scraping = False
 
-        if not os.path.exists(state_file):
-            raise FileNotFoundError(f"登录状态文件不存在: {state_file}")
-
-        snapshot_data = None
-        try:
-            with open(state_file, "r", encoding="utf-8") as f:
-                snapshot_data = json.load(f)
-        except Exception as e:
-            print(f"警告：读取登录状态文件失败，将直接按路径使用: {e}")
-
         async with async_playwright() as p:
-            launch_args = prepare_chromium_launch_args()
-
-            launch_kwargs = {"headless": RUN_HEADLESS, "args": launch_args}
-            if proxy_server:
-                launch_kwargs["proxy"] = {"server": proxy_server}
-
-            launch_kwargs["channel"] = _resolve_browser_channel()
-
-            browser = await p.chromium.launch(**launch_kwargs)
-
-            context_kwargs = _default_context_options()
-            storage_state_arg = state_file
-            analysis_dispatcher: Optional[ItemAnalysisDispatcher] = None
-
-            if isinstance(snapshot_data, dict):
-                # 新版扩展导出的增强快照，包含环境和Header
-                if any(
-                    key in snapshot_data
-                    for key in ("env", "headers", "page", "storage")
-                ):
-                    print(f"检测到增强浏览器快照，应用环境参数: {state_file}")
-                    storage_state_arg = {"cookies": snapshot_data.get("cookies", [])}
-                    context_kwargs.update(_build_context_overrides(snapshot_data))
-                    extra_headers = _build_extra_headers(snapshot_data.get("headers"))
-                    if extra_headers:
-                        context_kwargs["extra_http_headers"] = extra_headers
-                else:
-                    storage_state_arg = snapshot_data
-
-            context_kwargs = _clean_kwargs(context_kwargs)
-            context = await browser.new_context(
-                storage_state=storage_state_arg, **context_kwargs
+            browser, context = await create_logged_in_context(
+                p,
+                state_file,
+                channel=_resolve_browser_channel(),
+                proxy_server=proxy_server,
             )
+            analysis_dispatcher: Optional[ItemAnalysisDispatcher] = None
             seller_profile_cache = SellerProfileCache(
                 ttl_seconds=_get_seller_profile_cache_ttl(task_config)
             )
@@ -749,6 +632,36 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
             """)
 
             page = await context.new_page()
+
+            scrape_failed = False
+
+            async def _run_status_recheck_phase() -> None:
+                """复核已采集商品的在售状态（已售 / 已下架），并记录成交价。"""
+                settings = get_status_check_settings()
+                if not settings["enabled"]:
+                    return
+                try:
+                    summary = await run_status_recheck(
+                        context=context,
+                        page=page,
+                        keyword=keyword,
+                        result_filename=result_filename,
+                        run_id=history_run_id,
+                        fetch_detail=fetch_item_detail,
+                        limit=settings["limit"],
+                        interval_hours=settings["interval_hours"],
+                        max_seconds=settings["max_seconds"],
+                        probe_mode=settings["probe_mode"],
+                        seen_item_ids=history_seen_item_ids,
+                    )
+                    log_time(
+                        f"[状态巡检] 完成：复核 {summary.get('checked', 0)} 条，"
+                        f"已售 {summary.get('sold', 0)} 条，"
+                        f"已下架 {summary.get('delisted', 0)} 条，"
+                        f"失败 {summary.get('failed', 0)} 条。"
+                    )
+                except Exception as exc:
+                    print(f"[状态巡检] 执行异常，不影响主任务: {exc}")
 
             try:
                 # 步骤 0 - 模拟真实用户：先访问首页（重要的反检测措施）
@@ -1092,42 +1005,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         # --- 修改: 访问详情页前的等待时间，模拟用户在列表页上看了一会儿 ---
                         await random_sleep(2, 4)  # 原来是 (2, 4)
 
-                        detail_page = await context.new_page()
                         try:
-                            async with detail_page.expect_response(
-                                lambda r: DETAIL_API_URL_PATTERN in r.url, timeout=25000
-                            ) as detail_info:
-                                await detail_page.goto(
-                                    item_data["商品链接"],
-                                    wait_until="domcontentloaded",
-                                    timeout=25000,
-                                )
+                            detail_json = await fetch_item_detail(
+                                context, item_data["商品链接"]
+                            )
 
-                            detail_response = await detail_info.value
-                            if detail_response.ok:
-                                detail_json = await detail_response.json()
-
-                                ret_string = str(
-                                    await safe_get(detail_json, "ret", default=[])
-                                )
-                                if "FAIL_SYS_USER_VALIDATE" in ret_string:
-                                    print(
-                                        "\n==================== CRITICAL BLOCK DETECTED ===================="
-                                    )
-                                    print(
-                                        "检测到闲鱼反爬虫验证 (FAIL_SYS_USER_VALIDATE)，程序将终止。"
-                                    )
-                                    long_sleep_duration = random.randint(3, 60)
-                                    print(
-                                        f"为避免账户风险，将执行一次长时间休眠 ({long_sleep_duration} 秒) 后再退出..."
-                                    )
-                                    await asyncio.sleep(long_sleep_duration)
-                                    print("长时间休眠结束，现在将安全退出。")
-                                    print(
-                                        "==================================================================="
-                                    )
-                                    raise RiskControlError("FAIL_SYS_USER_VALIDATE")
-
+                            if detail_json is not None:
                                 # 解析商品详情数据并更新 item_data
                                 item_do = await safe_get(
                                     detail_json, "data", "itemDO", default={}
@@ -1229,28 +1112,12 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                                     "[反爬] 执行一次主要的随机延迟以模拟用户浏览间隔..."
                                 )
                                 await random_sleep(5, 10)
-                            else:
-                                print(
-                                    f"   错误: 获取商品详情API响应失败，状态码: {detail_response.status}"
-                                )
-                                if AI_DEBUG_MODE:
-                                    print(
-                                        f"--- [DETAIL DEBUG] FAILED RESPONSE from {item_data['商品链接']} ---"
-                                    )
-                                    try:
-                                        print(await detail_response.text())
-                                    except Exception as e:
-                                        print(f"无法读取响应内容: {e}")
-                                    print(
-                                        "----------------------------------------------------"
-                                    )
 
                         except PlaywrightTimeoutError:
                             print(f"   错误: 访问商品详情页或等待API响应超时。")
                         except Exception as e:
                             print(f"   错误: 处理商品详情时发生未知错误: {e}")
                         finally:
-                            await detail_page.close()
                             # --- 修改: 增加关闭页面后的短暂整理时间 ---
                             await random_sleep(2, 4)  # 原来是 (1, 2.5)
 
@@ -1267,24 +1134,32 @@ async def scrape_xianyu(task_config: dict, debug_limit: int = 0):
                         f"Login required: redirected to {page.url} (cookies/state likely expired)"
                     ) from e
                 print(f"\n操作超时错误: 页面元素或网络响应未在规定时间内出现。\n{e}")
+                scrape_failed = True
                 raise
             except asyncio.CancelledError:
                 log_time("收到取消信号，正在终止当前爬虫任务...")
+                scrape_failed = True
                 raise
             except Exception as e:
                 if type(e).__name__ == "TargetClosedError":
                     log_time("浏览器已关闭，忽略后续异常（可能是任务被停止）。")
+                    scrape_failed = True
                     return processed_item_count
                 if "passport.goofish.com" in str(e):
+                    scrape_failed = True
                     raise LoginRequiredError(
                         f"Login required: redirected to passport flow ({e})"
                     ) from e
                 print(f"\n爬取过程中发生未知错误: {e}")
+                scrape_failed = True
                 raise
             finally:
                 if analysis_dispatcher is not None:
                     log_time("等待后台分析任务完成...")
                     await analysis_dispatcher.join()
+                # 主抓取正常结束才做状态巡检；中途失败或被停止时不再打扰接口。
+                if not scrape_failed:
+                    await _run_status_recheck_phase()
                 log_time("任务执行完毕，浏览器将在5秒后自动关闭...")
                 await asyncio.sleep(5)
                 if debug_limit:

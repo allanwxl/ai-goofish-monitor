@@ -1,4 +1,4 @@
-from src.scraper import _build_extra_headers
+from src.services.browser_session import _build_extra_headers
 
 
 def test_build_extra_headers_drops_fetch_metadata_that_blanks_document():

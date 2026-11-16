@@ -6,7 +6,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional
 
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_connection import sqlite_connection
@@ -47,11 +48,15 @@ def _parse_raw_record(raw_json: str, *, status: str | None = None) -> dict:
     return record
 
 
+LISTING_STATUS_FILTER_VALUES = {"active", "sold", "delisted", "unknown"}
+
+
 def _build_query_conditions(
     *,
     filename: str,
     ai_recommended_only: bool,
     keyword_recommended_only: bool,
+    listing_status: list[str] | None = None,
 ) -> tuple[str, list]:
     conditions = ["result_filename = ?"]
     params: list = [filename]
@@ -63,6 +68,14 @@ def _build_query_conditions(
         conditions.append("is_recommended = 1")
         conditions.append("analysis_source = ?")
         params.append("keyword")
+    if listing_status:
+        normalized = [
+            value for value in listing_status if value in LISTING_STATUS_FILTER_VALUES
+        ]
+        if normalized:
+            placeholders = ", ".join("?" for _ in normalized)
+            conditions.append(f"listing_status IN ({placeholders})")
+            params.extend(normalized)
     return " AND ".join(conditions), params
 
 
@@ -90,7 +103,12 @@ def _load_blacklist_keywords_from_conn(conn, filename: str) -> list[str]:
     return normalize_blacklist_keywords(payload)
 
 
-def _decorate_record_visibility(record: dict, status: str | None, blacklist_keywords: list[str]) -> dict:
+def _decorate_record_visibility(
+    record: dict,
+    status: str | None,
+    blacklist_keywords: list[str],
+    listing: dict | None = None,
+) -> dict:
     matched_keywords = match_blacklist_keywords(record, blacklist_keywords)
     hidden_reason = None
     if status == "expired":
@@ -104,6 +122,16 @@ def _decorate_record_visibility(record: dict, status: str | None, blacklist_keyw
     record["_matched_blacklist_keywords"] = matched_keywords
     record["_hidden_reason"] = hidden_reason
     record["_effective_hidden"] = hidden_reason is not None
+
+    listing = listing or {}
+    record["_listing_status"] = listing.get("listing_status") or "unknown"
+    record["_sold_price"] = listing.get("sold_price")
+    record["_sold_price_display"] = listing.get("sold_price_display") or ""
+    record["_sold_price_source"] = listing.get("sold_price_source") or ""
+    record["_sold_at"] = listing.get("sold_at")
+    record["_status_checked_at"] = listing.get("status_checked_at")
+    record["_status_source"] = listing.get("status_source") or ""
+    record["_status_raw_code"] = listing.get("status_raw_code")
     return record
 
 
@@ -120,16 +148,20 @@ def _load_filtered_records_from_conn(
     sort_by: str,
     sort_order: str,
     include_hidden: bool,
+    listing_status: list[str] | None = None,
 ) -> list[dict]:
     where_clause, params = _build_query_conditions(
         filename=filename,
         ai_recommended_only=ai_recommended_only,
         keyword_recommended_only=keyword_recommended_only,
+        listing_status=listing_status,
     )
     order_clause = _sort_expression(sort_by, sort_order)
     rows = conn.execute(
         f"""
-        SELECT raw_json, status
+        SELECT raw_json, status, listing_status, sold_price, sold_price_display,
+               sold_price_source, sold_at, status_checked_at, status_source,
+               status_raw_code
         FROM result_items
         WHERE {where_clause}
         ORDER BY {order_clause}
@@ -141,7 +173,21 @@ def _load_filtered_records_from_conn(
     records: list[dict] = []
     for row in rows:
         record = _parse_raw_record(str(row["raw_json"]), status=row["status"])
-        decorated = _decorate_record_visibility(record, row["status"], blacklist_keywords)
+        decorated = _decorate_record_visibility(
+            record,
+            row["status"],
+            blacklist_keywords,
+            listing={
+                "listing_status": row["listing_status"],
+                "sold_price": row["sold_price"],
+                "sold_price_display": row["sold_price_display"],
+                "sold_price_source": row["sold_price_source"],
+                "sold_at": row["sold_at"],
+                "status_checked_at": row["status_checked_at"],
+                "status_source": row["status_source"],
+                "status_raw_code": row["status_raw_code"],
+            },
+        )
         if include_hidden or _is_record_visible(decorated):
             records.append(decorated)
     return records
@@ -263,6 +309,7 @@ async def query_result_records(
     page: int,
     limit: int,
     include_hidden: bool = False,
+    listing_status: list[str] | None = None,
 ) -> tuple[int, list[dict]]:
     return await asyncio.to_thread(
         _query_result_records_sync,
@@ -274,6 +321,7 @@ async def query_result_records(
         page,
         limit,
         include_hidden,
+        listing_status,
     )
 
 
@@ -286,6 +334,7 @@ def _query_result_records_sync(
     page: int,
     limit: int,
     include_hidden: bool,
+    listing_status: list[str] | None,
 ) -> tuple[int, list[dict]]:
     bootstrap_sqlite_storage()
     offset = max(page - 1, 0) * limit
@@ -298,6 +347,7 @@ def _query_result_records_sync(
             sort_by=sort_by,
             sort_order=sort_order,
             include_hidden=include_hidden,
+            listing_status=listing_status,
         )
     total = len(records)
     return total, records[offset: offset + limit]
@@ -311,6 +361,7 @@ async def load_all_result_records(
     sort_by: str,
     sort_order: str,
     include_hidden: bool = False,
+    listing_status: list[str] | None = None,
 ) -> list[dict]:
     return await asyncio.to_thread(
         _load_all_result_records_sync,
@@ -320,6 +371,7 @@ async def load_all_result_records(
         sort_by,
         sort_order,
         include_hidden,
+        listing_status,
     )
 
 
@@ -330,6 +382,7 @@ def _load_all_result_records_sync(
     sort_by: str,
     sort_order: str,
     include_hidden: bool,
+    listing_status: list[str] | None,
 ) -> list[dict]:
     bootstrap_sqlite_storage()
     with sqlite_connection() as conn:
@@ -341,6 +394,7 @@ def _load_all_result_records_sync(
             sort_by=sort_by,
             sort_order=sort_order,
             include_hidden=include_hidden,
+            listing_status=listing_status,
         )
 
 
@@ -473,3 +527,328 @@ def load_visible_result_item_ids(filename: str) -> set[str]:
         if item_id:
             item_ids.add(item_id)
     return item_ids
+
+
+# ── 商品在售状态（已售 / 已下架）相关存储 ──────────────────────────────
+
+RECHECKABLE_LISTING_STATUSES = ("active", "unknown")
+
+
+def load_status_recheck_queue(
+    filename: str,
+    *,
+    limit: int = 20,
+    interval_hours: int = 24,
+    seen_item_ids: Optional[set[str]] = None,
+) -> list[dict]:
+    """挑出本轮需要复核在售状态的记录。
+
+    只复核未终结的记录（active / unknown），已判定为已售或已下架的不再复核。
+    排序优先「AI 推荐命中」，其次「最久没查过」，最后「最近抓取」。
+
+    ``seen_item_ids`` 是本次运行在搜索结果里见过的商品。「本次没出现」的商品
+    更可能已经成交或被下架，所以会优先复核——但它只是排序权重，
+    绝不据此直接判定下架（搜索排序与分页同样会让商品缺席）。
+    """
+    bootstrap_sqlite_storage()
+    cutoff = (
+        datetime.now() - timedelta(hours=max(0, interval_hours))
+    ).isoformat()
+    placeholders = ", ".join("?" for _ in RECHECKABLE_LISTING_STATUSES)
+    candidate_limit = max(int(limit) * 10, 200)
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT item_id, link, title, price, price_display, listing_status,
+                   status_checked_at, is_recommended, crawl_time
+            FROM result_items
+            WHERE result_filename = ?
+              AND (listing_status IS NULL OR listing_status IN ({placeholders}))
+              AND (status_checked_at IS NULL OR status_checked_at <= ?)
+            ORDER BY is_recommended DESC,
+                     COALESCE(status_checked_at, '') ASC,
+                     crawl_time DESC
+            LIMIT ?
+            """,
+            (filename, *RECHECKABLE_LISTING_STATUSES, cutoff, candidate_limit),
+        ).fetchall()
+
+    entries = [
+        {
+            "item_id": str(row["item_id"] or ""),
+            "link": str(row["link"] or ""),
+            "title": str(row["title"] or ""),
+            "price": row["price"],
+            "price_display": str(row["price_display"] or ""),
+            "listing_status": str(row["listing_status"] or "unknown"),
+            "status_checked_at": row["status_checked_at"],
+            "is_recommended": bool(row["is_recommended"]),
+            "crawl_time": str(row["crawl_time"] or ""),
+        }
+        for row in rows
+        if str(row["item_id"] or "").strip()
+    ]
+
+    if seen_item_ids:
+        normalized_seen = {str(item_id) for item_id in seen_item_ids}
+        entries.sort(
+            key=lambda entry: (
+                not entry["is_recommended"],
+                entry["item_id"] in normalized_seen,
+                entry["status_checked_at"] or "",
+            )
+        )
+
+    return entries[: max(0, int(limit))]
+
+
+def persist_listing_status(
+    filename: str,
+    item_id: str,
+    *,
+    listing_status: str,
+    sold_price: float | None = None,
+    sold_price_display: str = "",
+    sold_price_source: str = "",
+    sold_at: str | None = None,
+    status_checked_at: str = "",
+    status_source: str = "",
+    status_raw_code: int | None = None,
+    run_id: str = "",
+    detail_json: str = "",
+) -> bool:
+    """写入商品的最新在售状态，并在状态变化时追加一条状态事件。
+
+    ``sold_at`` 只在首次判定为已售时落库；重复复核同一状态不会产生重复事件。
+    """
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT listing_status, sold_price
+            FROM result_items
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (filename, item_id),
+        ).fetchone()
+        if row is None:
+            return False
+
+        previous_status = str(row["listing_status"] or "unknown")
+        previous_price = row["sold_price"]
+        status_changed = previous_status != listing_status
+        price_first_seen = (
+            sold_price is not None
+            and previous_price is None
+        )
+
+        conn.execute(
+            """
+            UPDATE result_items
+            SET listing_status = ?,
+                sold_price = COALESCE(?, sold_price),
+                sold_price_display = CASE WHEN ? != '' THEN ? ELSE sold_price_display END,
+                sold_price_source = CASE WHEN ? != '' THEN ? ELSE sold_price_source END,
+                sold_at = CASE WHEN ? = 'sold' THEN COALESCE(sold_at, ?) ELSE sold_at END,
+                status_checked_at = ?,
+                status_source = ?,
+                status_raw_code = ?,
+                delisted_streak = CASE
+                    WHEN ? = 'delisted' THEN delisted_streak
+                    ELSE 0
+                END
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (
+                listing_status,
+                sold_price,
+                sold_price_display,
+                sold_price_display,
+                sold_price_source,
+                sold_price_source,
+                listing_status,
+                sold_at or "",
+                status_checked_at,
+                status_source,
+                status_raw_code,
+                listing_status,
+                filename,
+                item_id,
+            ),
+        )
+
+        if status_changed or price_first_seen:
+            conn.execute(
+                """
+                INSERT INTO item_status_events (
+                    result_filename, item_id, from_status, to_status, price,
+                    price_display, price_source, status_raw_code, detected_at,
+                    run_id, detail_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    filename,
+                    item_id,
+                    previous_status,
+                    listing_status,
+                    sold_price,
+                    sold_price_display,
+                    sold_price_source,
+                    status_raw_code,
+                    status_checked_at,
+                    run_id,
+                    detail_json,
+                ),
+            )
+        conn.commit()
+    return True
+
+
+def mark_item_status_checked(
+    filename: str,
+    item_id: str,
+    *,
+    status_checked_at: str = "",
+    status_source: str = "",
+    status_raw_code: int | None = None,
+) -> bool:
+    """只更新复核时间戳与来源，不改变商品的listing_status。"""
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE result_items
+            SET status_checked_at = ?,
+                status_source = ?,
+                status_raw_code = ?
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (status_checked_at, status_source, status_raw_code, filename, item_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def load_delisted_streak(filename: str, item_id: str) -> int:
+    """读取连续判定为「已下架」的次数。"""
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT delisted_streak FROM result_items
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (filename, item_id),
+        ).fetchone()
+    if row is None:
+        return 0
+    return int(row["delisted_streak"] or 0)
+
+
+def increment_delisted_streak(filename: str, item_id: str) -> int:
+    """累加「连续判定为已下架」的次数，返回累加后的值。
+
+    用于「连续多次都判下架才落终态」的保守模式：即使本轮还没达到确认次数，
+    计数也要累加，否则永远攒不够次数。
+    """
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        conn.execute(
+            """
+            UPDATE result_items
+            SET delisted_streak = COALESCE(delisted_streak, 0) + 1
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (filename, item_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT delisted_streak FROM result_items
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (filename, item_id),
+        ).fetchone()
+    if row is None:
+        return 0
+    return int(row["delisted_streak"] or 0)
+
+
+def mark_item_status_check_failed(
+    filename: str,
+    item_id: str,
+    *,
+    status_checked_at: str = "",
+) -> bool:
+    """复核失败时只更新时间戳，不改变商品状态。
+
+    查不到商品不等于商品已下架，绝不能因为一次探测失败就改写业务状态。
+    """
+    return mark_item_status_checked(
+        filename,
+        item_id,
+        status_checked_at=status_checked_at,
+        status_source="error",
+    )
+
+
+def load_item_status_events(filename: str) -> list[dict]:
+    """读取某个结果集的商品状态变更事件流。"""
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT item_id, from_status, to_status, price, price_display,
+                   price_source, status_raw_code, detected_at, run_id
+            FROM item_status_events
+            WHERE result_filename = ?
+            ORDER BY detected_at ASC, id ASC
+            """,
+            (filename,),
+        ).fetchall()
+    return [
+        {
+            "item_id": str(row["item_id"] or ""),
+            "from_status": row["from_status"],
+            "to_status": row["to_status"],
+            "price": row["price"],
+            "price_display": str(row["price_display"] or ""),
+            "price_source": str(row["price_source"] or ""),
+            "status_raw_code": row["status_raw_code"],
+            "detected_at": str(row["detected_at"] or ""),
+            "run_id": str(row["run_id"] or ""),
+        }
+        for row in rows
+    ]
+
+
+def load_listing_status_counts(filename: str) -> dict[str, int]:
+    """统计某个结果集里各在售状态下的记录数。"""
+    bootstrap_sqlite_storage()
+    counts = {
+        "active_count": 0,
+        "sold_count": 0,
+        "delisted_count": 0,
+        "unknown_count": 0,
+    }
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT listing_status, COUNT(1) AS total
+            FROM result_items
+            WHERE result_filename = ?
+            GROUP BY listing_status
+            """,
+            (filename,),
+        ).fetchall()
+    counter = {
+        "active": "active_count",
+        "sold": "sold_count",
+        "delisted": "delisted_count",
+        "unknown": "unknown_count",
+    }
+    for row in rows:
+        key = counter.get(str(row["listing_status"] or "unknown"))
+        if key:
+            counts[key] = int(row["total"] or 0)
+    return counts

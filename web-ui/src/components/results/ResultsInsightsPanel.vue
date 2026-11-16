@@ -73,7 +73,7 @@ const latestSnapshotText = computed(() => {
           </article>
         </div>
 
-        <PriceTrendChart :points="insights?.daily_trend || []" />
+        <PriceTrendChart :points="insights?.daily_trend || []" :sold-points="insights?.sold_trend || []" />
       </div>
 
       <div class="space-y-4">
