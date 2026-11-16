@@ -4,6 +4,8 @@ import type {
   TaskGenerateRequest,
   TaskGenerationJob,
   TaskUpdate,
+  ScheduleSuggestRequest,
+  ScheduleSuggestResponse,
 } from '@/types/task.d.ts'
 import { http } from '@/lib/http'
 
@@ -47,4 +49,17 @@ export async function stopTask(taskId: number): Promise<void> {
 
 export async function deleteTask(taskId: number): Promise<void> {
   await http(`/api/tasks/${taskId}`, { method: 'DELETE' })
+}
+
+/** 让 AI 生成一个避开其它任务执行时间的 cron 表达式 */
+export async function suggestSchedule(
+  data: ScheduleSuggestRequest,
+): Promise<ScheduleSuggestResponse> {
+  return await http('/api/tasks/suggest-schedule', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(data),
+  })
 }

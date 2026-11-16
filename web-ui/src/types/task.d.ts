@@ -74,3 +74,21 @@ export interface TaskGenerateRequest {
   decision_mode?: 'ai' | 'keyword';
   keyword_rules?: string[];
 }
+
+// AI 生成避开其它任务执行时间的定时规则
+export interface ScheduleSuggestRequest {
+  // 编辑已有任务时传入，用于把该任务自身排除在冲突检查之外
+  task_id?: number | null;
+  task_name?: string;
+  keyword?: string;
+  preferred?: string;
+}
+
+export interface ScheduleSuggestResponse {
+  cron: string;
+  reason: string;
+  // ai = AI 生成；fallback = AI 不可用时的确定性兜底
+  source: 'ai' | 'fallback';
+  avoided: string[];
+  considered_tasks: number;
+}

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { Loader2, Sparkles } from 'lucide-vue-next'
 import type { Task, TaskGenerateRequest } from '@/types/task.d.ts'
+import { suggestSchedule } from '@/api/tasks'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
+import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import TaskRegionSelector from '@/components/tasks/TaskRegionSelector.vue'
@@ -34,6 +37,8 @@ const accountStrategy = ref<'auto' | 'fixed' | 'rotate'>('auto')
 const selectedAccountStateFile = ref(AUTO_ACCOUNT_VALUE)
 const keywordRulesInput = ref('')
 const cronMode = ref<'preset' | 'custom'>('preset')
+const isSuggestingCron = ref(false)
+const cronSuggestion = ref<{ cron: string; reason: string; source: 'ai' | 'fallback'; avoided: string[] } | null>(null)
 
 // 常用 cron 预设选项
 const cronPresets = computed(() => [
@@ -158,6 +163,8 @@ watch(() => [props.mode, props.initialData, props.defaultValues, props.defaultAc
   accountStrategy.value = form.value.account_strategy || (props.defaultAccount ? 'fixed' : 'auto')
   selectedAccountStateFile.value =
     form.value.account_state_file || props.defaultAccount || AUTO_ACCOUNT_VALUE
+  // 表单重置时清掉旧的 AI 建议，避免提示与当前 cron 不一致
+  cronSuggestion.value = null
 }, { immediate: true, deep: true })
 
 watch(accountStrategy, (value) => {
@@ -181,6 +188,46 @@ function handleAccountStrategyChange(event: Event) {
 
 function handleAccountStateFileChange(event: Event) {
   selectedAccountStateFile.value = (event.target as HTMLSelectElement).value || AUTO_ACCOUNT_VALUE
+}
+
+/**
+ * 让 AI 挑一个不与其它任务冲突的执行时间。
+ * 编辑模式下把当前任务自身排除在冲突检查之外，避免它自己跟自己冲突。
+ */
+async function handleSuggestCron() {
+  if (isSuggestingCron.value) return
+  isSuggestingCron.value = true
+  cronSuggestion.value = null
+  try {
+    const currentTaskId = props.mode === 'edit' ? props.initialData?.id ?? null : null
+    const result = await suggestSchedule({
+      task_id: currentTaskId,
+      task_name: String(form.value.task_name || ''),
+      keyword: String(form.value.keyword || ''),
+    })
+    form.value.cron = result.cron
+    cronMode.value = 'custom'
+    cronSuggestion.value = {
+      cron: result.cron,
+      reason: result.reason,
+      source: result.source,
+      avoided: result.avoided || [],
+    }
+    toast({
+      title: result.source === 'ai'
+        ? t('tasks.form.cronSuggest.success')
+        : t('tasks.form.cronSuggest.fallbackSuccess'),
+      description: result.reason,
+    })
+  } catch (error) {
+    toast({
+      title: t('tasks.form.cronSuggest.failed'),
+      description: (error as Error).message,
+      variant: 'destructive',
+    })
+  } finally {
+    isSuggestingCron.value = false
+  }
 }
 
 function handleSubmit() {
@@ -357,12 +404,42 @@ function handleSubmit() {
                 v-model="form.cron"
                 :placeholder="t('tasks.form.cronCustomPlaceholder')"
               />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                class="mt-2"
+                :disabled="isSuggestingCron"
+                @click="handleSuggestCron"
+              >
+                <Loader2 v-if="isSuggestingCron" class="animate-spin" />
+                <Sparkles v-else />
+                {{
+                  isSuggestingCron
+                    ? t('tasks.form.cronSuggest.generating')
+                    : t('tasks.form.cronSuggest.button')
+                }}
+              </Button>
               <p class="text-xs text-gray-500 mt-1">
                 {{ t('tasks.form.cronCustomHintLine1') }}
               </p>
               <p class="text-xs text-gray-500">
                 {{ t('tasks.form.cronCustomHintLine2') }}
               </p>
+              <div
+                v-if="cronSuggestion && cronSuggestion.cron === form.cron"
+                class="mt-2 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-800"
+              >
+                <p class="font-medium">{{ t('tasks.form.cronSuggest.resultTitle') }}</p>
+                <p class="mt-1">{{ cronSuggestion.reason }}</p>
+                <p v-if="cronSuggestion.avoided.length > 0" class="mt-1">
+                  {{
+                    t('tasks.form.cronSuggest.avoided', {
+                      count: cronSuggestion.avoided.length,
+                    })
+                  }}
+                </p>
+              </div>
             </TabsContent>
           </Tabs>
         </div>

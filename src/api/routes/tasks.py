@@ -21,13 +21,17 @@ from src.services.task_generation_runner import (
     run_ai_generation_job,
 )
 from src.services.task_payloads import serialize_task, serialize_tasks
-from src.domain.models.task import TaskCreate, TaskUpdate, TaskGenerateRequest
+from src.domain.models.task import TaskCreate, TaskUpdate, TaskGenerateRequest, ScheduleSuggestRequest
 from src.prompt_utils import generate_criteria
 from src.utils import resolve_task_log_path
 from src.services.account_strategy_service import normalize_account_strategy
 from src.infrastructure.persistence.storage_names import build_result_filename
 from src.services.price_history_service import delete_price_snapshots
 from src.services.result_storage_service import delete_result_file_records
+from src.services.schedule_suggestion_service import (
+    ScheduleSuggestionError,
+    ScheduleSuggestionService,
+)
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 async def _reload_scheduler_if_needed(
@@ -84,6 +88,33 @@ async def create_task(
     task = await service.create_task(task_create)
     await _reload_scheduler_if_needed(service, scheduler_service)
     return {"message": "任务创建成功", "task": serialize_task(task, scheduler_service)}
+@router.post("/suggest-schedule", response_model=dict)
+async def suggest_schedule(
+    req: ScheduleSuggestRequest,
+    service: TaskService = Depends(get_task_service),
+):
+    """AI 生成一个避开其它任务执行时间的定时规则"""
+    try:
+        tasks = await service.get_all_tasks()
+        suggestion_service = ScheduleSuggestionService()
+        suggestion = await suggestion_service.suggest(
+            tasks=tasks,
+            task_name=req.task_name or "",
+            keyword=req.keyword or "",
+            exclude_task_id=req.task_id,
+            preferred=req.preferred or "",
+        )
+        return suggestion.to_payload()
+    except ScheduleSuggestionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"AI 生成定时规则失败: {str(e)}"
+        print(error_msg)
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_msg)
 @router.post("/generate", response_model=dict)
 async def generate_task(
     req: TaskGenerateRequest,

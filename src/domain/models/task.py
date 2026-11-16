@@ -289,6 +289,19 @@ class TaskUpdate(BaseModel):
         return self
 
 
+class ScheduleSuggestRequest(BaseModel):
+    """AI 生成定时规则的请求DTO"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    # 编辑已有任务时传入，用于把该任务自身排除在冲突检查之外
+    task_id: Optional[int] = None
+    task_name: Optional[str] = None
+    keyword: Optional[str] = None
+    # 用户额外的偏好描述，例如"希望每天早上跑一次"
+    preferred: Optional[str] = None
+
+
 class TaskGenerateRequest(BaseModel):
     """任务创建请求DTO（AI模式支持自动生成标准）"""
 
