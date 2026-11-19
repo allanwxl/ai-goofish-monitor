@@ -1,11 +1,24 @@
 import json
+from datetime import datetime
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api.routes import results
+from src.infrastructure.persistence.sqlite_connection import sqlite_connection
 from src.services.item_status_service import apply_listing_status, parse_listing_status
 from src.services.price_history_service import record_market_snapshots
+from src.services.result_storage_service import load_item_status_events, load_status_recheck_queue
+
+
+# 真实码值要用线上响应样本校准；测试里用固定映射覆盖行为。
+TEST_CODE_MAP = {"1": "sold", "7": "sold", "-98": "delisted"}
+
+
+@pytest.fixture(autouse=True)
+def _status_code_map(monkeypatch):
+    monkeypatch.setenv("ITEM_STATUS_CODE_MAP", json.dumps(TEST_CODE_MAP))
 
 
 def _write_jsonl(path, records):
@@ -632,3 +645,305 @@ def test_manual_status_check_starts_background_job_when_enabled(tmp_path, monkey
     client.get("/api/results/demo_full_data.jsonl")
     assert calls.get("keyword") == "demo"
     assert calls.get("result_filename") == "demo_full_data.jsonl"
+
+
+# ── 手动重置误判状态（status-reset） ────────────────────────────────────
+
+
+def _seed_status_records(jsonl_dir, item_ids):
+    """写一份结果文件，并给每条记录灌入指定的在售状态。"""
+    records = []
+    for index, item_id in enumerate(item_ids):
+        records.append(
+            {
+                "爬取时间": f"2026-01-02T09:0{index}:00",
+                "搜索关键字": "demo",
+                "任务名称": "Demo 任务",
+                "商品信息": {
+                    "商品ID": item_id,
+                    "商品标题": f"Demo {item_id}",
+                    "商品链接": f"https://www.goofish.com/item?id={item_id}",
+                    "当前售价": "¥950",
+                    "发布时间": "2026-01-02 08:30",
+                },
+                "卖家信息": {"卖家昵称": "卖家A"},
+                "ai_analysis": {
+                    "analysis_source": "ai",
+                    "is_recommended": True,
+                    "reason": "符合预期",
+                },
+            }
+        )
+    _write_jsonl(jsonl_dir / "demo_full_data.jsonl", records)
+
+
+def _status_row(item_id):
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT listing_status, sold_price, sold_price_display, sold_price_source,
+                   sold_at, status_checked_at, status_source, status_raw_code
+            FROM result_items WHERE item_id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+    return dict(row) if row is not None else {}
+
+
+def test_status_reset_is_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ITEM_STATUS_RESET_ENABLED", raising=False)
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-reset", json={})
+    assert resp.status_code == 403
+    assert "ITEM_STATUS_RESET_ENABLED" in resp.json()["detail"]
+
+
+def test_status_reset_rejects_invalid_filename(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo.txt/status-reset", json={})
+    assert resp.status_code == 400
+
+
+def test_status_reset_resets_records_and_deletes_events(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001", "1002"])
+
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1001",
+        parse_listing_status(_listing_detail(item_status=1, sold_cnt=1, sold_price="900")),
+        detected_at="2026-01-03T10:00:00",
+    )
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1002",
+        parse_listing_status(_listing_detail(item_status=-98)),
+        detected_at="2026-01-03T10:00:00",
+    )
+    assert len(load_item_status_events("demo_full_data.jsonl")) == 2
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-reset", json={})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["reset_items"] == 2
+    assert payload["deleted_events"] == 2
+    assert payload["recheck_started"] is False
+    assert payload["recheck_limit"] == 2
+    assert payload["recheck_budget_seconds"] > 0
+
+    row = _status_row("1001")
+    assert row["listing_status"] == "unknown"
+    assert row["sold_price"] is None
+    assert row["sold_price_display"] == ""
+    assert row["sold_price_source"] == ""
+    assert row["sold_at"] is None
+    assert row["status_checked_at"] == ""
+    assert row["status_source"] is None
+
+    # 成交价曲线的数据源（状态事件）被清掉
+    assert load_item_status_events("demo_full_data.jsonl") == []
+
+    # 结果页不再显示假的「已售」
+    list_resp = client.get("/api/results/demo_full_data.jsonl")
+    assert list_resp.status_code == 200
+    for item in list_resp.json()["items"]:
+        assert item["_listing_status"] == "unknown"
+        assert item["_sold_price"] is None
+
+
+def test_status_reset_respects_item_ids_filter(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001", "1002"])
+
+    for item_id in ("1001", "1002"):
+        apply_listing_status(
+            "demo_full_data.jsonl",
+            item_id,
+            parse_listing_status(_listing_detail(item_status=1, sold_cnt=1, sold_price="900")),
+            detected_at="2026-01-03T10:00:00",
+        )
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/results/demo_full_data.jsonl/status-reset",
+        json={"item_ids": ["1001"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reset_items"] == 1
+
+    assert _status_row("1001")["listing_status"] == "unknown"
+    assert _status_row("1002")["listing_status"] == "sold"
+
+
+def test_status_reset_respects_status_raw_codes_filter(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1001",
+        parse_listing_status(_listing_detail(item_status=1, sold_cnt=1, sold_price="900")),
+        detected_at="2026-01-03T10:00:00",
+    )
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/results/demo_full_data.jsonl/status-reset",
+        json={"status_raw_codes": [999]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reset_items"] == 0
+    assert _status_row("1001")["listing_status"] == "sold"
+
+    resp = client.post(
+        "/api/results/demo_full_data.jsonl/status-reset",
+        json={"status_raw_codes": [1]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["reset_items"] == 1
+
+
+def test_status_reset_rejects_unknown_status(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/results/demo_full_data.jsonl/status-reset",
+        json={"statuses": ["not-a-status"]},
+    )
+    assert resp.status_code == 400
+
+
+def test_reset_records_are_queued_first_for_recheck(tmp_path, monkeypatch):
+    """重置后 status_checked_at 为空 → 下一轮复核优先重判它们。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001", "1002"])
+
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1001",
+        parse_listing_status(_listing_detail(item_status=1, sold_cnt=1, sold_price="900")),
+        detected_at="2026-01-03T10:00:00",
+    )
+    # 1002 刚复核过，24 小时间隔内不会进队列
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1002",
+        parse_listing_status(_listing_detail(item_status=4242)),
+        detected_at=datetime.now().isoformat(),
+    )
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-reset", json={})
+    assert resp.status_code == 200
+
+    queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20, interval_hours=24)
+    assert [entry["item_id"] for entry in queue] == ["1001"]
+
+
+def test_status_reset_starts_recheck_with_limit_when_enabled(tmp_path, monkeypatch):
+    """开启手动复核后，重置会顺带触发一次复核，并把重置条数作为上限。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+    monkeypatch.setenv("ITEM_STATUS_MANUAL_CHECK_ENABLED", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001", "1002"])
+
+    for item_id in ("1001", "1002"):
+        apply_listing_status(
+            "demo_full_data.jsonl",
+            item_id,
+            parse_listing_status(_listing_detail(item_status=1, sold_cnt=1, sold_price="900")),
+            detected_at="2026-01-03T10:00:00",
+        )
+
+    calls: dict = {}
+
+    async def fake_run(*, keyword, result_filename, run_id=None, limit=None, max_seconds=None):
+        calls["keyword"] = keyword
+        calls["result_filename"] = result_filename
+        calls["limit"] = limit
+        return {"checked": 0, "sold": 0, "delisted": 0, "failed": 0}
+
+    monkeypatch.setattr(results, "run_standalone_status_check", fake_run)
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-reset", json={})
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["recheck_started"] is True
+    assert payload["recheck_limit"] == 2
+
+    # 再发一次请求，给事件循环机会把后台任务跑完
+    client.get("/api/results/demo_full_data.jsonl")
+    assert calls.get("limit") == 2
+    assert calls.get("result_filename") == "demo_full_data.jsonl"
+
+
+def test_status_reset_accepts_request_without_body(tmp_path, monkeypatch):
+    """请求体可省略：等价于默认参数（重置该文件内全部已售 / 已下架记录）。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RESET_ENABLED", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    apply_listing_status(
+        "demo_full_data.jsonl",
+        "1001",
+        parse_listing_status(_listing_detail(item_status=1, sold_cnt=1, sold_price="900")),
+        detected_at="2026-01-03T10:00:00",
+    )
+
+    app = FastAPI()
+    app.include_router(results.router)
+    client = TestClient(app)
+
+    resp = client.post("/api/results/demo_full_data.jsonl/status-reset")
+    assert resp.status_code == 200
+    assert resp.json()["reset_items"] == 1
+    assert _status_row("1001")["listing_status"] == "unknown"

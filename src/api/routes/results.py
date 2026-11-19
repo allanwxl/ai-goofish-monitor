@@ -7,15 +7,21 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
 from urllib.parse import quote
 
 from src.services.price_history_service import build_price_history_insights
-from src.services.item_status_service import build_sold_status_insights
+from src.services.item_status_service import (
+    VALID_LISTING_STATUSES,
+    build_sold_status_insights,
+)
 from src.services.item_status_task_runner import (
     is_manual_status_check_enabled,
+    is_status_reset_enabled,
     run_standalone_status_check,
 )
+from src.services.item_status_rechecker import get_status_check_settings
 from src.services.result_export_service import build_results_csv
 from src.services.result_file_service import (
     enrich_records_with_price_insight,
@@ -29,6 +35,7 @@ from src.services.result_storage_service import (
     load_result_blacklist_keywords,
     load_visible_result_item_ids,
     query_result_records,
+    reset_listing_status,
     result_file_exists,
     save_result_blacklist_keywords,
     update_item_status,
@@ -253,6 +260,111 @@ async def trigger_status_check(filename: str):
         "message": "状态复核已启动，完成后刷新结果页即可看到最新状态。",
         "filename": filename,
         "keyword": keyword,
+    }
+
+
+class StatusResetRequest(BaseModel):
+    """手动重置误判的商品状态。"""
+
+    # 要重置的业务状态，默认清掉「已售 / 已下架」两类终态
+    statuses: list[str] = Field(default_factory=lambda: ["sold", "delisted"])
+    # 只重置指定商品（为空表示该结果文件内全部命中 statuses 的记录）
+    item_ids: Optional[list[str]] = None
+    # 只重置原始状态码命中的记录（校准出码表后用于精确收敛，避免误伤真成交）
+    status_raw_codes: Optional[list[int]] = None
+    # 重置后是否立即触发一次复核（把 unknown 重判成在售 / 已售 / 已下架）
+    recheck: bool = True
+
+
+@router.post("/{filename}/status-reset")
+async def trigger_status_reset(filename: str, body: StatusResetRequest | None = None):
+    """手动重置误判的商品状态（已售 / 已下架 → unknown）。
+
+    默认关闭：需要显式设置 ``ITEM_STATUS_RESET_ENABLED=true``。
+    这个接口会**清空成交价并删除状态事件**（成交价曲线的数据源），
+    而后端 API 目前没有鉴权中间件，请在受信网络内使用。
+
+    重置只把记录打回 ``unknown``（不直接写「在售」）——清理那一刻并不知道商品
+    此刻的真实状态，先置未知再重判是唯一诚实的顺序。
+
+    ``recheck=true`` 时会顺带触发一次状态复核，把被重置的记录重新判定；
+    复核需要 ``ITEM_STATUS_MANUAL_CHECK_ENABLED=true``，否则只重置不重判。
+
+    请求体可省略（等价于默认参数）：重置该结果文件内全部已售 / 已下架记录。
+    """
+    if not is_status_reset_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="手动重置商品状态未启用，如需使用请设置 ITEM_STATUS_RESET_ENABLED=true。",
+        )
+
+    try:
+        validate_result_filename(filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    request = body or StatusResetRequest()
+
+    invalid_statuses = [
+        status
+        for status in request.statuses
+        if str(status).strip().lower() not in VALID_LISTING_STATUSES
+    ]
+    if invalid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的状态：{', '.join(invalid_statuses)}",
+        )
+    if not request.statuses:
+        raise HTTPException(status_code=400, detail="statuses 不能为空")
+
+    result = reset_listing_status(
+        filename,
+        statuses=request.statuses,
+        item_ids=request.item_ids,
+        status_raw_codes=request.status_raw_codes,
+    )
+
+    settings = get_status_check_settings()
+    recheck_limit = int(result["reset_items"])
+    recheck_budget = int(settings["max_seconds"])
+    recheck_started = False
+    recheck_skip_reason = ""
+
+    if request.recheck and recheck_limit > 0:
+        if is_manual_status_check_enabled():
+            keyword = filename.replace("_full_data.jsonl", "")
+            task = asyncio.create_task(
+                run_standalone_status_check(
+                    keyword=keyword,
+                    result_filename=filename,
+                    limit=recheck_limit,
+                )
+            )
+            # 任务句柄要留一份强引用，否则可能被垃圾回收掉
+            _STATUS_CHECK_TASKS.add(task)
+            task.add_done_callback(_STATUS_CHECK_TASKS.discard)
+            recheck_started = True
+        else:
+            recheck_skip_reason = (
+                "ITEM_STATUS_MANUAL_CHECK_ENABLED 未开启，本次只重置不重判。"
+            )
+    elif request.recheck:
+        recheck_skip_reason = "没有命中任何需要重置的记录，无需复核。"
+
+    return {
+        "message": (
+            f"已重置 {result['reset_items']} 条记录，清空成交价并删除 "
+            f"{result['deleted_events']} 条状态事件。"
+            "重置后的记录显示为「未知」，复核完成后会更新为真实状态。"
+        ),
+        "filename": filename,
+        "reset_items": result["reset_items"],
+        "deleted_events": result["deleted_events"],
+        "recheck_started": recheck_started,
+        "recheck_limit": recheck_limit,
+        "recheck_budget_seconds": recheck_budget,
+        "recheck_skip_reason": recheck_skip_reason,
     }
 
 

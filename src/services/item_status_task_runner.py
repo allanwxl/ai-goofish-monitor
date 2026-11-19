@@ -41,6 +41,18 @@ def is_manual_status_check_enabled() -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def is_status_reset_enabled() -> bool:
+    """是否开放「手动重置商品状态」接口。
+
+    重置比复核更具破坏性（会清空成交价、删除状态事件），所以用独立开关，
+    默认关闭。
+    """
+    raw = os.getenv("ITEM_STATUS_RESET_ENABLED")
+    if raw is None or not str(raw).strip():
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 async def resolve_state_file(keyword: str) -> str:
     """按关键词找到任务对应的登录状态文件。"""
     state_dir = os.getenv("ACCOUNT_STATE_DIR", "state").strip().strip('"').strip("'")
@@ -82,8 +94,15 @@ async def run_standalone_status_check(
     keyword: str,
     result_filename: str,
     run_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    max_seconds: Optional[int] = None,
 ) -> dict:
-    """起一个浏览器，只跑一次状态复核。"""
+    """起一个浏览器，只跑一次状态复核。
+
+    ``limit`` / ``max_seconds`` 为 None 时沿用环境变量配置（默认 20 条 / 300 秒）。
+    存量数据清理后需要一次性重判被重置的全部记录时，可以把 ``limit`` 调大；
+    **时间预算不建议放开**，避免把账号打到风控。
+    """
     global _RUNNING
 
     async with _RUN_LOCK:
@@ -116,6 +135,8 @@ async def run_standalone_status_check(
                     result_filename=result_filename,
                     run_id=effective_run_id,
                     fetch_detail=fetch_item_detail,
+                    limit=limit,
+                    max_seconds=max_seconds,
                 )
             finally:
                 await browser.close()

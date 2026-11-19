@@ -6,8 +6,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Sequence
 
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_connection import sqlite_connection
@@ -531,7 +532,28 @@ def load_visible_result_item_ids(filename: str) -> set[str]:
 
 # ── 商品在售状态（已售 / 已下架）相关存储 ──────────────────────────────
 
+# 默认只复核「未终结」的记录；已判定为已售 / 已下架的记录是终态。
 RECHECKABLE_LISTING_STATUSES = ("active", "unknown")
+
+# 打开 ITEM_STATUS_RECHECK_TERMINAL 后，终态记录也参与复核（误判可自动纠正）。
+TERMINAL_RECHECKABLE_LISTING_STATUSES = ("active", "unknown", "sold", "delisted")
+
+# 允许被重置的业务状态（重置即回到 unknown）。
+RESETTABLE_LISTING_STATUSES = ("sold", "delisted")
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _recheckable_listing_statuses() -> tuple[str, ...]:
+    """本轮允许参与复核的商品状态集合。"""
+    if _env_flag("ITEM_STATUS_RECHECK_TERMINAL", False):
+        return TERMINAL_RECHECKABLE_LISTING_STATUSES
+    return RECHECKABLE_LISTING_STATUSES
 
 
 def load_status_recheck_queue(
@@ -543,7 +565,8 @@ def load_status_recheck_queue(
 ) -> list[dict]:
     """挑出本轮需要复核在售状态的记录。
 
-    只复核未终结的记录（active / unknown），已判定为已售或已下架的不再复核。
+    默认只复核未终结的记录（active / unknown），已判定为已售或已下架的不再复核；
+    设置 ``ITEM_STATUS_RECHECK_TERMINAL=true`` 后终态记录也会参与复核。
     排序优先「AI 推荐命中」，其次「最久没查过」，最后「最近抓取」。
 
     ``seen_item_ids`` 是本次运行在搜索结果里见过的商品。「本次没出现」的商品
@@ -554,7 +577,8 @@ def load_status_recheck_queue(
     cutoff = (
         datetime.now() - timedelta(hours=max(0, interval_hours))
     ).isoformat()
-    placeholders = ", ".join("?" for _ in RECHECKABLE_LISTING_STATUSES)
+    recheckable = _recheckable_listing_statuses()
+    placeholders = ", ".join("?" for _ in recheckable)
     candidate_limit = max(int(limit) * 10, 200)
     with sqlite_connection() as conn:
         rows = conn.execute(
@@ -570,7 +594,7 @@ def load_status_recheck_queue(
                      crawl_time DESC
             LIMIT ?
             """,
-            (filename, *RECHECKABLE_LISTING_STATUSES, cutoff, candidate_limit),
+            (filename, *recheckable, cutoff, candidate_limit),
         ).fetchall()
 
     entries = [
@@ -711,16 +735,22 @@ def mark_item_status_checked(
     status_checked_at: str = "",
     status_source: str = "",
     status_raw_code: int | None = None,
+    keep_raw_code: bool = False,
 ) -> bool:
-    """只更新复核时间戳与来源，不改变商品的listing_status。"""
+    """只更新复核时间戳与来源，不改变商品的listing_status。
+
+    ``keep_raw_code=True`` 时保留原有的 ``status_raw_code``（探测失败时用），
+    避免把上一轮留档的原始状态码覆盖成空。
+    """
     bootstrap_sqlite_storage()
+    raw_code_expr = "COALESCE(?, status_raw_code)" if keep_raw_code else "?"
     with sqlite_connection() as conn:
         cursor = conn.execute(
-            """
+            f"""
             UPDATE result_items
             SET status_checked_at = ?,
                 status_source = ?,
-                status_raw_code = ?
+                status_raw_code = {raw_code_expr}
             WHERE result_filename = ? AND item_id = ?
             """,
             (status_checked_at, status_source, status_raw_code, filename, item_id),
@@ -779,17 +809,164 @@ def mark_item_status_check_failed(
     item_id: str,
     *,
     status_checked_at: str = "",
+    keep_raw_code: bool = True,
 ) -> bool:
     """复核失败时只更新时间戳，不改变商品状态。
 
     查不到商品不等于商品已下架，绝不能因为一次探测失败就改写业务状态。
+    ``keep_raw_code`` 默认保留上一轮的原始状态码，便于事后校准码表。
     """
     return mark_item_status_checked(
         filename,
         item_id,
         status_checked_at=status_checked_at,
         status_source="error",
+        keep_raw_code=keep_raw_code,
     )
+
+
+def delete_item_status_events(
+    filename: str,
+    *,
+    to_statuses: Sequence[str] = ("sold", "delisted"),
+    item_ids: Optional[Sequence[str]] = None,
+) -> int:
+    """删除指定结果文件里的状态事件（成交价曲线的数据源）。
+
+    返回删除的条数。所有 DELETE 都带显式 WHERE。
+    """
+    bootstrap_sqlite_storage()
+    normalized = [str(s).strip().lower() for s in to_statuses if str(s).strip()]
+    if not normalized:
+        return 0
+
+    conditions = ["result_filename = ?"]
+    params: list = [filename]
+    placeholders = ", ".join("?" for _ in normalized)
+    conditions.append(f"to_status IN ({placeholders})")
+    params.extend(normalized)
+
+    normalized_ids = [str(i).strip() for i in (item_ids or []) if str(i).strip()]
+    if normalized_ids:
+        # 分批 IN，避免一次命中太多记录时超出 SQLite 变量上限
+        deleted = 0
+        with sqlite_connection() as conn:
+            for start in range(0, len(normalized_ids), 400):
+                chunk = normalized_ids[start : start + 400]
+                chunk_placeholders = ", ".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"""
+                    DELETE FROM item_status_events
+                    WHERE result_filename = ?
+                      AND to_status IN ({placeholders})
+                      AND item_id IN ({chunk_placeholders})
+                    """,
+                    (filename, *normalized, *chunk),
+                )
+                deleted += int(cursor.rowcount or 0)
+            conn.commit()
+        return deleted
+
+    with sqlite_connection() as conn:
+        cursor = conn.execute(
+            f"DELETE FROM item_status_events WHERE {' AND '.join(conditions)}",
+            params,
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0)
+
+
+def reset_listing_status(
+    filename: str,
+    *,
+    statuses: Sequence[str] = ("sold", "delisted"),
+    item_ids: Optional[Sequence[str]] = None,
+    status_raw_codes: Optional[Sequence[int]] = None,
+) -> dict:
+    """把误判记录重置回 unknown，清空成交价与相关事件。
+
+    用于清理「商品实际仍在售却被标记成已售」的存量数据：
+
+    * ``result_items``：状态回到 ``unknown``，清空成交价 / 成交时间，
+      ``status_checked_at`` 置空（保证下一轮复核优先挑中它）
+    * ``item_status_events``：删除**同一批记录**对应的状态事件（成交价曲线的数据源）
+
+    事件删除用子查询锁定「即将被重置的那批记录」，因此按 ``item_ids`` /
+    ``status_raw_codes`` 收敛时不会误伤其它记录的历史事件。
+
+    所有 UPDATE / DELETE 都带显式 WHERE。
+
+    返回 ``{"reset_items": n, "deleted_events": m}``。
+    """
+    bootstrap_sqlite_storage()
+    normalized_statuses = [
+        str(s).strip().lower() for s in statuses if str(s).strip()
+    ]
+    if not normalized_statuses:
+        return {"reset_items": 0, "deleted_events": 0}
+
+    conditions = ["result_filename = ?"]
+    where_params: list = [filename]
+    status_placeholders = ", ".join("?" for _ in normalized_statuses)
+    conditions.append(f"listing_status IN ({status_placeholders})")
+    where_params.extend(normalized_statuses)
+
+    normalized_ids = [str(i).strip() for i in (item_ids or []) if str(i).strip()]
+    if normalized_ids:
+        id_placeholders = ", ".join("?" for _ in normalized_ids)
+        conditions.append(f"item_id IN ({id_placeholders})")
+        where_params.extend(normalized_ids)
+
+    normalized_codes: list[int] = []
+    for code in status_raw_codes or []:
+        try:
+            normalized_codes.append(int(code))
+        except (TypeError, ValueError):
+            continue
+    if normalized_codes:
+        code_placeholders = ", ".join("?" for _ in normalized_codes)
+        conditions.append(f"status_raw_code IN ({code_placeholders})")
+        where_params.extend(normalized_codes)
+
+    where = " AND ".join(conditions)
+
+    with sqlite_connection() as conn:
+        # 先删事件：子查询基于「重置前」的状态，正好锁定这批记录
+        deleted_events = int(
+            conn.execute(
+                f"""
+                DELETE FROM item_status_events
+                WHERE result_filename = ?
+                  AND to_status IN ({status_placeholders})
+                  AND item_id IN (
+                      SELECT item_id FROM result_items WHERE {where}
+                  )
+                """,
+                (filename, *normalized_statuses, *where_params),
+            ).rowcount
+            or 0
+        )
+
+        # 再重置记录：状态回 unknown，清空成交价，清空复核时间戳
+        cursor = conn.execute(
+            f"""
+            UPDATE result_items
+            SET listing_status = 'unknown',
+                sold_price = NULL,
+                sold_price_display = '',
+                sold_price_source = '',
+                sold_at = NULL,
+                delisted_streak = 0,
+                status_checked_at = '',
+                status_source = NULL
+            WHERE {where}
+            """,
+            where_params,
+        )
+        reset_items = int(cursor.rowcount or 0)
+        conn.commit()
+
+    return {"reset_items": reset_items, "deleted_events": deleted_events}
 
 
 def load_item_status_events(filename: str) -> list[dict]:

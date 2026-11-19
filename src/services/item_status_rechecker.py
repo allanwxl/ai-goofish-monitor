@@ -237,7 +237,31 @@ async def run_status_recheck(
             continue
 
         try:
-            info = parse_listing_status(detail_json)
+            info = parse_listing_status(detail_json, expected_item_id=item_id)
+        except Exception as exc:
+            summary["failed"] += 1
+            log_time(f"[状态巡检] 解析 {item_id} 响应失败: {exc}")
+            mark_item_status_check_failed(
+                result_filename,
+                item_id,
+                status_checked_at=detected_at,
+            )
+            continue
+
+        # 探测失败（接口级失败 / 返回了别的商品）不是业务结论，绝不改写状态
+        if not info.probe_ok:
+            summary["failed"] += 1
+            log_time(
+                f"[状态巡检] {item_id} 探测失败（{info.note or info.source}），保持原状态。"
+            )
+            mark_item_status_check_failed(
+                result_filename,
+                item_id,
+                status_checked_at=detected_at,
+            )
+            continue
+
+        try:
             outcome = apply_listing_status(
                 result_filename,
                 item_id,
