@@ -19,6 +19,12 @@ class NotificationMessage:
     notification_title: str
     content: str
     image_url: str | None
+    original_price: str | None = None
+    location: str | None = None
+    seller: str | None = None
+    publish_time: str | None = None
+    wants_count: str | None = None
+    tags: tuple[str, ...] = ()
 
 
 class NotificationClient(ABC):
@@ -88,4 +94,30 @@ class NotificationClient(ABC):
             notification_title=notification_title,
             content="\n".join(content_lines),
             image_url=main_image,
+            original_price=_optional_text(product_data.get('商品原价')),
+            location=_optional_text(product_data.get('发货地区')),
+            seller=_optional_text(product_data.get('卖家昵称')),
+            publish_time=_optional_text(product_data.get('发布时间')),
+            wants_count=_optional_text(product_data.get('“想要”人数')),
+            tags=_normalize_tags(product_data.get('商品标签')),
         )
+
+
+def _optional_text(value) -> str | None:
+    """把可能为 None/数字的值转成去空白文本，空值返回 None。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_tags(value) -> tuple[str, ...]:
+    """把商品标签整理成去空、去重后的字符串元组。"""
+    if not isinstance(value, (list, tuple, set)):
+        return ()
+    tags: list[str] = []
+    for item in value:
+        text = _optional_text(item)
+        if text and text not in tags:
+            tags.append(text)
+    return tuple(tags)

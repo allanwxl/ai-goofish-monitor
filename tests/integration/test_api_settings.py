@@ -432,7 +432,8 @@ def test_notification_test_endpoint_supports_feishu_channel(tmp_path, monkeypatc
     payload = response.json()
     assert payload["results"]["feishu"]["success"] is True
     assert captured["url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/stored-token"
-    assert captured["json"]["msg_type"] == "text"
+    assert captured["json"]["msg_type"] == "interactive"
+    assert captured["json"]["card"]["header"]["template"] == "blue"
     assert captured["json"]["sign"]
 
 

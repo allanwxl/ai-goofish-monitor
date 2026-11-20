@@ -93,6 +93,17 @@ def _product():
     }
 
 
+class _FakeFeishuResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
 def test_pushplus_client_sends_text_template_and_requires_business_code(monkeypatch):
     captured = {}
 
@@ -139,21 +150,14 @@ def test_pushplus_client_rejects_business_error_with_http_200(monkeypatch):
         asyncio.run(client.send(_product(), "价格合适"))
 
 
-def test_feishu_client_sends_text_payload(monkeypatch):
+def test_feishu_client_sends_interactive_card_payload(monkeypatch):
     captured = {}
-
-    class _FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"code": 0, "msg": "success"}
 
     def _fake_post(url, json=None, headers=None, timeout=None):
         captured["url"] = url
         captured["json"] = json
         captured["headers"] = headers
-        return _FakeResponse()
+        return _FakeFeishuResponse({"code": 0, "msg": "success"})
 
     monkeypatch.setattr("requests.post", _fake_post)
 
@@ -164,30 +168,148 @@ def test_feishu_client_sends_text_payload(monkeypatch):
 
     asyncio.run(client.send(_product(), "价格合适"))
 
+    payload = captured["json"]
+    card = payload["card"]
     assert captured["url"] == "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token"
-    assert captured["json"]["msg_type"] == "text"
-    assert captured["json"]["content"]["text"].startswith("🚨 新推荐! Sony A7M4")
-    assert "价格: 9999" in captured["json"]["content"]["text"]
-    assert "原因: 价格合适" in captured["json"]["content"]["text"]
-    assert "https://www.goofish.com/item/123" in captured["json"]["content"]["text"]
+    assert payload["msg_type"] == "interactive"
+    assert card["schema"] == "2.0"
+    assert card["header"]["template"] == "blue"
+    assert card["header"]["title"]["content"] == "🚨 新推荐! Sony A7M4"
+
+    body_text = "\n".join(
+        element.get("content", "")
+        for element in card["body"]["elements"]
+        if element.get("tag") == "markdown"
+    )
+    assert "价格: **9999**" in body_text
+    assert "原因: 价格合适" in body_text
+
+    actions = [
+        element
+        for element in card["body"]["elements"]
+        if element.get("tag") == "action"
+    ]
+    assert len(actions) == 1
+    buttons = actions[0]["actions"]
+    assert buttons[0]["url"] == "https://www.goofish.com/item/123"
+    assert buttons[0]["text"]["content"] == "💻 电脑端查看"
+
     # 未配置签名密钥时不下发签名字段
-    assert "timestamp" not in captured["json"]
-    assert "sign" not in captured["json"]
+    assert "timestamp" not in payload
+    assert "sign" not in payload
+
+
+def test_feishu_card_contains_extra_product_fields(monkeypatch):
+    captured = {}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeFeishuResponse({"code": 0, "msg": "success"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    product = {
+        **_product(),
+        "商品原价": "12999",
+        "发货地区": "上海",
+        "卖家昵称": "阿呆的小店",
+        "发布时间": "2026-11-20 09:30",
+        "“想要”人数": "12",
+        "商品标签": ["包邮", "验货宝"],
+    }
+    asyncio.run(client.send(product, "价格合适"))
+
+    card = captured["json"]["card"]
+    body_text = "\n".join(
+        element.get("content", "")
+        for element in card["body"]["elements"]
+        if element.get("tag") == "markdown"
+    )
+    assert "原价: 12999" in body_text
+    assert "地区: 上海" in body_text
+    assert "卖家: 阿呆的小店" in body_text
+    assert "发布: 2026-11-20 09:30" in body_text
+    assert "想要: 12 人" in body_text
+    assert "标签: 包邮 / 验货宝" in body_text
+
+
+def test_feishu_client_builds_alert_card_for_task_failure(monkeypatch):
+    captured = {}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeFeishuResponse({"code": 0, "msg": "success"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(
+        client.send(
+            {
+                "商品标题": "[任务异常] MacBook",
+                "当前售价": "N/A",
+                "商品链接": "#",
+            },
+            "任务运行失败",
+        )
+    )
+
+    card = captured["json"]["card"]
+    assert card["header"]["template"] == "red"
+    assert card["header"]["title"]["content"] == "⚠️ [任务异常] MacBook"
+    assert all(
+        element.get("tag") != "action" for element in card["body"]["elements"]
+    )
+    body_text = "\n".join(
+        element.get("content", "")
+        for element in card["body"]["elements"]
+        if element.get("tag") == "markdown"
+    )
+    assert "原因: 任务运行失败" in body_text
+
+
+def test_feishu_client_falls_back_to_text_when_card_rejected(monkeypatch):
+    payloads = []
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        payloads.append(json)
+        if len(payloads) == 1:
+            return _FakeFeishuResponse({"code": 9499, "msg": "Bad Request"})
+        return _FakeFeishuResponse({"code": 0, "msg": "success"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(client.send(_product(), "价格合适"))
+
+    assert len(payloads) == 2
+    assert payloads[0]["msg_type"] == "interactive"
+    assert payloads[1]["msg_type"] == "text"
+    assert payloads[1]["content"]["text"].startswith("🚨 新推荐! Sony A7M4")
+    assert "价格: 9999" in payloads[1]["content"]["text"]
+    assert "原因: 价格合适" in payloads[1]["content"]["text"]
+    assert "https://www.goofish.com/item/123" in payloads[1]["content"]["text"]
 
 
 def test_feishu_client_signs_payload_when_secret_configured(monkeypatch):
     captured = {}
 
-    class _FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"StatusCode": 0, "StatusMessage": "success"}
-
     def _fake_post(url, json=None, headers=None, timeout=None):
         captured["json"] = json
-        return _FakeResponse()
+        return _FakeFeishuResponse({"StatusCode": 0, "StatusMessage": "success"})
 
     monkeypatch.setattr("requests.post", _fake_post)
 
@@ -212,16 +334,11 @@ def test_feishu_client_signs_payload_when_secret_configured(monkeypatch):
 
 
 def test_feishu_client_rejects_business_error_with_http_200(monkeypatch):
-    class _FakeResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"code": 19021, "msg": "sign match fail"}
-
     monkeypatch.setattr(
         "requests.post",
-        lambda *args, **kwargs: _FakeResponse(),
+        lambda *args, **kwargs: _FakeFeishuResponse(
+            {"code": 19021, "msg": "sign match fail"}
+        ),
     )
     client = FeishuBotClient(
         "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
