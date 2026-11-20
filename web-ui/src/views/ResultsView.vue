@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useResults } from '@/composables/useResults'
+import type { ResultItem } from '@/types/result.d.ts'
 import ResultsFilterBar from '@/components/results/ResultsFilterBar.vue'
 import ResultsGrid from '@/components/results/ResultsGrid.vue'
 import ResultsInsightsPanel from '@/components/results/ResultsInsightsPanel.vue'
@@ -31,6 +32,7 @@ const {
   exportSelectedResults,
   deleteSelectedFile,
   toggleItemBlock,
+  setItemListingStatus,
   blacklistKeywords,
   isSavingBlacklist,
   saveBlacklistRules,
@@ -125,6 +127,24 @@ async function handleSaveBlacklistRules() {
     })
   }
 }
+
+async function handleSetListingStatus(item: ResultItem, status: 'sold' | 'unknown') {
+  const isMarkSold = status === 'sold'
+  try {
+    await setItemListingStatus(item, status)
+    toast({
+      title: isMarkSold
+        ? t('results.card.markSoldSuccess')
+        : t('results.card.unmarkSoldSuccess'),
+    })
+  } catch (e) {
+    toast({
+      title: isMarkSold ? t('results.card.markSoldFailed') : t('results.card.unmarkSoldFailed'),
+      description: (e as Error).message,
+      variant: 'destructive',
+    })
+  }
+}
 </script>
 
 <template>
@@ -158,7 +178,12 @@ async function handleSaveBlacklistRules() {
 
     <ResultsInsightsPanel :insights="insights" :selected-task-label="selectedTaskLabel" />
 
-    <ResultsGrid :results="results" :is-loading="isLoading" @toggle-block="toggleItemBlock" />
+    <ResultsGrid
+      :results="results"
+      :is-loading="isLoading"
+      @toggle-block="toggleItemBlock"
+      @set-listing-status="handleSetListingStatus"
+    />
 
     <Dialog v-model:open="isDeleteDialogOpen">
       <DialogContent class="sm:max-w-[420px]">

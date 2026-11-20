@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import Badge from '@/components/ui/badge/Badge.vue'
-import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye } from 'lucide-vue-next'
+import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye, RotateCcw } from 'lucide-vue-next'
 import { formatDateTime } from '@/i18n'
 
 interface Props {
@@ -20,6 +20,7 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   (e: 'toggle-block', item: ResultItem): void
+  (e: 'set-listing-status', item: ResultItem, status: 'sold' | 'unknown'): void
 }>()
 const { t } = useI18n()
 
@@ -64,6 +65,15 @@ const statusMeta = computed(() => {
   }
 })
 const isTerminated = computed(() => listingStatus.value === 'sold' || listingStatus.value === 'delisted')
+const isSold = computed(() => listingStatus.value === 'sold')
+// 人工标记的记录：平台探测不会覆盖它，界面上要能区分出来
+const isManualStatus = computed(() => props.item._status_source === 'manual')
+const manualMarkedTitle = computed(() => {
+  const checkedAt = props.item._status_checked_at
+  if (!checkedAt) return t('results.card.manualTag')
+  return t('results.status.manualMarkedAt', { time: formatDateTime(checkedAt) })
+})
+const listingStatusAction = computed<'sold' | 'unknown'>(() => (isSold.value ? 'unknown' : 'sold'))
 const isSoldPriceEstimated = computed(
   () => listingStatus.value === 'sold' && props.item._sold_price_source === 'listing_fallback'
 )
@@ -111,6 +121,17 @@ const expanded = ref(false)
           :class="statusMeta.badge"
         >
           {{ statusMeta.label }}
+        </Badge>
+      </div>
+      <!-- 人工标记标识放在图片左下角，避免和右上角图标按钮抢位置 -->
+      <div v-if="isManualStatus && listingStatus !== 'unknown'" class="absolute bottom-3 left-3">
+        <Badge
+          variant="secondary"
+          class="backdrop-blur-md border-none shadow-sm text-white bg-indigo-500/90"
+          :title="manualMarkedTitle"
+          :aria-label="manualMarkedTitle"
+        >
+          {{ t('results.status.manual') }}
         </Badge>
       </div>
       <div class="absolute top-3 right-3 flex gap-1.5">
@@ -221,20 +242,35 @@ const expanded = ref(false)
       </div>
     </CardContent>
 
-    <CardFooter class="px-4 py-3 bg-slate-50/30 border-t border-slate-100/60 flex items-center justify-between text-[10px]">
-      <div class="flex items-center gap-3 text-slate-400">
-        <div class="flex items-center gap-1">
+    <CardFooter class="px-4 py-3 bg-slate-50/30 border-t border-slate-100/60 flex items-center justify-between gap-2 text-[10px]">
+      <div class="flex items-center gap-3 text-slate-400 min-w-0 overflow-hidden">
+        <div class="flex items-center gap-1 shrink-0">
           <User class="w-3 h-3" />
           <span class="truncate max-w-[60px]">{{ seller.卖家昵称 || info.卖家昵称 || t('results.card.anonymous') }}</span>
         </div>
-        <div class="flex items-center gap-1">
+        <div class="flex items-center gap-1 shrink-0">
           <Clock class="w-3 h-3" />
           <span>{{ crawlTime }}</span>
         </div>
       </div>
-      <a :href="info.商品链接" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-primary font-bold hover:gap-1.5 transition-all">
-        {{ t('results.card.detail') }} <ExternalLink class="w-3 h-3" />
-      </a>
+      <div class="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          @click="emit('set-listing-status', props.item, listingStatusAction)"
+          :aria-label="isSold ? t('results.card.unmarkSold') : t('results.card.markSold')"
+          class="inline-flex items-center gap-1 rounded-full border px-2 py-1 font-semibold transition-colors"
+          :class="isSold
+            ? 'border-slate-300 bg-white text-slate-500 hover:border-slate-400 hover:text-slate-700'
+            : 'border-rose-200 bg-rose-50 text-rose-600 hover:border-rose-300 hover:bg-rose-100'"
+        >
+          <RotateCcw v-if="isSold" class="w-3 h-3" />
+          <CheckCircle2 v-else class="w-3 h-3" />
+          <span>{{ isSold ? t('results.card.unmarkSold') : t('results.card.markSold') }}</span>
+        </button>
+        <a :href="info.商品链接" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-primary font-bold hover:gap-1.5 transition-all">
+          {{ t('results.card.detail') }} <ExternalLink class="w-3 h-3" />
+        </a>
+      </div>
     </CardFooter>
   </Card>
 </template>

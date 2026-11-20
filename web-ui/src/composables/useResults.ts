@@ -234,6 +234,26 @@ export function useResults() {
     }
   }
 
+  /**
+   * 人工标记 / 撤销商品「已售」。
+   *
+   * 与可见性状态（_status）互不影响；成交价曲线会变，所以 insights 也要一起刷新。
+   */
+  async function setItemListingStatus(item: ResultItem, status: 'sold' | 'unknown') {
+    if (!selectedFile.value) return
+    const itemId = item.商品信息?.商品ID
+    if (!itemId) return
+    error.value = null
+    try {
+      await resultsApi.updateItemListingStatus(selectedFile.value, itemId, status)
+      await fetchResults()
+      await fetchInsights()
+    } catch (e) {
+      if (e instanceof Error) error.value = e
+      throw e
+    }
+  }
+
   async function saveBlacklistRules(keywords: string[]) {
     if (!selectedFile.value) return
     isSavingBlacklist.value = true
@@ -308,6 +328,7 @@ export function useResults() {
     exportSelectedResults,
     deleteSelectedFile,
     toggleItemBlock,
+    setItemListingStatus,
     blacklistKeywords,
     isSavingBlacklist,
     saveBlacklistRules,

@@ -947,3 +947,169 @@ def test_status_reset_accepts_request_without_body(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["reset_items"] == 1
     assert _status_row("1001")["listing_status"] == "unknown"
+
+
+# ── 人工标记已售（listing-status） ─────────────────────────────────────
+
+
+def _client():
+    app = FastAPI()
+    app.include_router(results.router)
+    return TestClient(app)
+
+
+def test_manual_mark_sold_updates_listing_status_and_price(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+
+    resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "sold"},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["listing_status"] == "sold"
+    assert payload["changed"] is True
+    assert payload["sold_price"] == 950.0
+    assert payload["sold_price_source"] == "listing_fallback"
+
+    list_resp = client.get("/api/results/demo_full_data.jsonl")
+    assert list_resp.status_code == 200
+    item = list_resp.json()["items"][0]
+    assert item["_listing_status"] == "sold"
+    assert item["_sold_price"] == 950.0
+    assert item["_sold_price_display"] == "¥950"
+    assert item["_sold_price_source"] == "listing_fallback"
+    assert item["_status_source"] == "manual"
+
+
+def test_manual_unmark_sold_resets_listing_status(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "sold"},
+    )
+
+    resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "unknown"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["changed"] is True
+    assert resp.json()["listing_status"] == "unknown"
+
+    item = client.get("/api/results/demo_full_data.jsonl").json()["items"][0]
+    assert item["_listing_status"] == "unknown"
+    assert item["_sold_price"] is None
+    assert item["_sold_price_display"] == ""
+
+
+def test_manual_mark_sold_updates_insights(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "sold"},
+    )
+
+    insights = client.get("/api/results/demo_full_data.jsonl/insights").json()
+    assert insights["sold_summary"]["sold_count"] == 1
+    assert insights["sold_summary"]["estimated_count"] == 1
+    assert insights["sold_trend"][0]["avg_price"] == 950.0
+
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "unknown"},
+    )
+    insights = client.get("/api/results/demo_full_data.jsonl/insights").json()
+    assert insights["sold_summary"]["sold_count"] == 0
+    assert insights["sold_trend"] == []
+
+
+def test_manual_mark_sold_does_not_change_visibility(tmp_path, monkeypatch):
+    """在售状态与可见性是两套语义：标记已售不会隐藏记录。"""
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "sold"},
+    )
+
+    item = client.get("/api/results/demo_full_data.jsonl").json()["items"][0]
+    assert item["_status"] == "active"
+    assert item["_listing_status"] == "sold"
+    assert client.get("/api/results/demo_full_data.jsonl").json()["total_items"] == 1
+
+
+def test_manual_mark_sold_rejects_invalid_status(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "delisted"},
+    )
+    assert resp.status_code == 422
+
+
+def test_manual_mark_sold_rejects_invalid_filename(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    client = _client()
+    resp = client.patch(
+        "/api/results/demo.txt/items/1001/listing-status",
+        json={"listing_status": "sold"},
+    )
+    assert resp.status_code == 400
+
+
+def test_manual_mark_sold_returns_404_for_missing_item(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/404/listing-status",
+        json={"listing_status": "sold"},
+    )
+    assert resp.status_code == 404
+
+
+def test_manual_mark_sold_is_excluded_from_recheck_queue(tmp_path, monkeypatch):
+    """人工标记的已售不会被自动巡检覆盖。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RECHECK_TERMINAL", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "sold"},
+    )
+
+    queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20)
+    assert "1001" not in {entry["item_id"] for entry in queue}

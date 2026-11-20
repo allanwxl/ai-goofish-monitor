@@ -211,6 +211,8 @@ const zhCN = {
       delisted: '已下架',
       unknown: '未知',
       checkedAt: '状态核对于 {time}',
+      manual: '人工',
+      manualMarkedAt: '人工标记于 {time}',
     },
     card: {
       curated: '精选',
@@ -233,6 +235,13 @@ const zhCN = {
       soldPriceSource: '平台成交价',
       block: '屏蔽',
       unblock: '取消屏蔽',
+      markSold: '标记已售',
+      unmarkSold: '取消已售',
+      manualTag: '人工标记',
+      markSoldSuccess: '已标记为已售（成交价按挂牌价估算）',
+      unmarkSoldSuccess: '已取消已售标记',
+      markSoldFailed: '标记已售失败',
+      unmarkSoldFailed: '取消已售标记失败',
     },
   },
   logs: {

@@ -541,6 +541,12 @@ TERMINAL_RECHECKABLE_LISTING_STATUSES = ("active", "unknown", "sold", "delisted"
 # 允许被重置的业务状态（重置即回到 unknown）。
 RESETTABLE_LISTING_STATUSES = ("sold", "delisted")
 
+# 人工标记（用户在结果页手动标记已售）的记录来源标记。
+MANUAL_STATUS_SOURCE = "manual"
+
+# 人工标记的「已售」不参与自动巡检：平台探测结果不覆盖人工判断。
+MANUAL_SOLD_GUARD_SQL = "NOT (listing_status = 'sold' AND status_source = 'manual')"
+
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -589,6 +595,7 @@ def load_status_recheck_queue(
             WHERE result_filename = ?
               AND (listing_status IS NULL OR listing_status IN ({placeholders}))
               AND (status_checked_at IS NULL OR status_checked_at <= ?)
+              AND {MANUAL_SOLD_GUARD_SQL}
             ORDER BY is_recommended DESC,
                      COALESCE(status_checked_at, '') ASC,
                      crawl_time DESC
@@ -624,6 +631,57 @@ def load_status_recheck_queue(
         )
 
     return entries[: max(0, int(limit))]
+
+
+def load_item_listing_snapshot(filename: str, item_id: str) -> Optional[dict]:
+    """读取单条记录的挂牌价与当前在售状态（人工标记用）。
+
+    挂牌价优先取 ``raw_json`` 里的「当前售价」——那正是卡片上显示的那个价；
+    取不到时回落到 ``result_items.price`` 列。所有查询都带显式 WHERE。
+    """
+    bootstrap_sqlite_storage()
+    with sqlite_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT listing_status, sold_price, sold_price_display, sold_price_source,
+                   sold_at, price, price_display, raw_json
+            FROM result_items
+            WHERE result_filename = ? AND item_id = ?
+            """,
+            (filename, item_id),
+        ).fetchone()
+    if row is None:
+        return None
+
+    listing_price = None
+    listing_price_display = ""
+    raw_json = str(row["raw_json"] or "")
+    if raw_json:
+        try:
+            payload = json.loads(raw_json)
+        except json.JSONDecodeError:
+            payload = {}
+        product = payload.get("商品信息") if isinstance(payload, dict) else None
+        if isinstance(product, dict):
+            raw_price = str(product.get("当前售价") or "").strip()
+            if raw_price:
+                listing_price_display = raw_price
+                listing_price = parse_price_value(raw_price)
+
+    if listing_price is None:
+        listing_price = row["price"]
+    if not listing_price_display:
+        listing_price_display = str(row["price_display"] or "")
+
+    return {
+        "listing_status": str(row["listing_status"] or "unknown"),
+        "sold_price": row["sold_price"],
+        "sold_price_display": str(row["sold_price_display"] or ""),
+        "sold_price_source": str(row["sold_price_source"] or ""),
+        "sold_at": row["sold_at"],
+        "listing_price": listing_price,
+        "listing_price_display": listing_price_display,
+    }
 
 
 def persist_listing_status(

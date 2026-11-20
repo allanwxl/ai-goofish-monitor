@@ -211,6 +211,8 @@ const enUS = {
       delisted: 'Delisted',
       unknown: 'Unknown',
       checkedAt: 'Checked at {time}',
+      manual: 'Manual',
+      manualMarkedAt: 'Manually marked at {time}',
     },
     card: {
       curated: 'Curated',
@@ -233,6 +235,13 @@ const enUS = {
       soldPriceSource: 'Platform sold price',
       block: 'Block',
       unblock: 'Unblock',
+      markSold: 'Mark Sold',
+      unmarkSold: 'Undo Sold',
+      manualTag: 'Manually marked',
+      markSoldSuccess: 'Marked as sold (price estimated from listing price)',
+      unmarkSoldSuccess: 'Sold mark removed',
+      markSoldFailed: 'Failed to mark as sold',
+      unmarkSoldFailed: 'Failed to remove the sold mark',
     },
   },
   logs: {
