@@ -13,7 +13,7 @@ const { t } = useI18n()
 
 const emit = defineEmits<{
   (e: 'toggle-block', item: ResultItem): void
-  (e: 'set-listing-status', item: ResultItem, status: 'sold' | 'unknown'): void
+  (e: 'set-listing-status', item: ResultItem, status: 'sold' | 'delisted' | 'unknown'): void
 }>()
 const skeletonItems = Array.from({ length: 8 }, (_, index) => index)
 </script>

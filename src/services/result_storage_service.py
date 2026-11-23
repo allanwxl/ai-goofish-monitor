@@ -541,11 +541,15 @@ TERMINAL_RECHECKABLE_LISTING_STATUSES = ("active", "unknown", "sold", "delisted"
 # 允许被重置的业务状态（重置即回到 unknown）。
 RESETTABLE_LISTING_STATUSES = ("sold", "delisted")
 
-# 人工标记（用户在结果页手动标记已售）的记录来源标记。
+# 人工标记（用户在结果页手动标记已售 / 已下架）的记录来源标记。
 MANUAL_STATUS_SOURCE = "manual"
 
-# 人工标记的「已售」不参与自动巡检：平台探测结果不覆盖人工判断。
-MANUAL_SOLD_GUARD_SQL = "NOT (listing_status = 'sold' AND status_source = 'manual')"
+# 人工标记的终态记录不参与自动巡检：平台探测结果不覆盖人工判断。
+# （已售与已下架都算人工终态，否则 ITEM_STATUS_RECHECK_TERMINAL=true 时
+#   人工标的「已下架」会被平台探测结果改写。）
+MANUAL_LISTING_GUARD_SQL = (
+    "NOT (status_source = 'manual' AND listing_status IN ('sold', 'delisted'))"
+)
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -595,7 +599,7 @@ def load_status_recheck_queue(
             WHERE result_filename = ?
               AND (listing_status IS NULL OR listing_status IN ({placeholders}))
               AND (status_checked_at IS NULL OR status_checked_at <= ?)
-              AND {MANUAL_SOLD_GUARD_SQL}
+              AND {MANUAL_LISTING_GUARD_SQL}
             ORDER BY is_recommended DESC,
                      COALESCE(status_checked_at, '') ASC,
                      crawl_time DESC

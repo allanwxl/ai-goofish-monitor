@@ -23,8 +23,9 @@ from src.services.item_status_task_runner import (
 )
 from src.services.item_status_rechecker import get_status_check_settings
 from src.services.item_status_manual_service import (
+    clear_manual_listing_status,
+    mark_item_delisted_manually,
     mark_item_sold_manually,
-    unmark_item_sold_manually,
 )
 from src.services.result_export_service import build_results_csv
 from src.services.result_file_service import (
@@ -232,9 +233,10 @@ async def patch_item_status(filename: str, item_id: str, body: UpdateStatusReque
 
 
 class ManualListingStatus(str, Enum):
-    """人工可写的在售状态（只开放「已售」与「撤销」）。"""
+    """人工可写的在售状态（标记已售 / 标记已下架 / 撤销）。"""
 
     SOLD = "sold"
+    DELISTED = "delisted"
     UNKNOWN = "unknown"
 
 
@@ -248,14 +250,16 @@ async def patch_item_listing_status(
     item_id: str,
     body: UpdateListingStatusRequest,
 ):
-    """人工标记 / 撤销商品「已售」（在售状态）。
+    """人工标记 / 撤销商品在售状态（已售 / 已下架）。
 
     ⚠️ 与 ``PATCH .../status``（active/hidden/expired，可见性）是两套语义，
-    互不影响：标记已售不会隐藏卡片。
+    互不影响：标记已售 / 已下架不会隐藏卡片。
 
     * ``sold``：置为已售，来源记为人工，成交价按挂牌价**估算**，
       并追加一条状态事件（成交价曲线会收录这笔）。
-    * ``unknown``：撤销已售，状态回落未知、清空成交价、删除该商品的成交事件。
+    * ``delisted``：置为已下架，来源记为人工；已下架表示没卖出去，
+      因此会清掉可能残留的成交价与成交事件（不进成交价曲线）。
+    * ``unknown``：撤销人工标记，状态回落未知、清空成交价、删除该商品的状态事件。
 
     人工标记的记录不会被自动巡检覆盖（平台探测结果不推翻人工判断）。
     """
@@ -266,19 +270,23 @@ async def patch_item_listing_status(
 
     if body.listing_status == ManualListingStatus.SOLD:
         result = mark_item_sold_manually(filename, item_id)
+    elif body.listing_status == ManualListingStatus.DELISTED:
+        result = mark_item_delisted_manually(filename, item_id)
     else:
-        result = unmark_item_sold_manually(filename, item_id)
+        result = clear_manual_listing_status(filename, item_id)
 
     if result["reason"] == "not_found":
         raise HTTPException(status_code=404, detail="商品未找到")
 
     if body.listing_status == ManualListingStatus.SOLD:
         message = "已标记为已售（成交价按挂牌价估算）。" if result["changed"] else "商品已是已售状态。"
+    elif body.listing_status == ManualListingStatus.DELISTED:
+        message = "已标记为已下架。" if result["changed"] else "商品已是已下架状态。"
     else:
         if result["changed"]:
-            message = "已取消已售标记，状态回落为未知。"
-        elif result["reason"] == "not_sold":
-            message = "当前不是已售状态，无需取消。"
+            message = "已取消人工标记，状态回落为未知。"
+        elif result["reason"] == "not_marked":
+            message = "当前没有人工标记，无需取消。"
         else:
             message = "商品已是未知状态。"
 

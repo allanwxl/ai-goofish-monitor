@@ -128,18 +128,23 @@ async function handleSaveBlacklistRules() {
   }
 }
 
-async function handleSetListingStatus(item: ResultItem, status: 'sold' | 'unknown') {
-  const isMarkSold = status === 'sold'
+// 三种人工操作各自对应的提示文案：标记已售 / 标记已下架 / 撤销
+const LISTING_STATUS_TOAST: Record<'sold' | 'delisted' | 'unknown', { success: string; failed: string }> = {
+  sold: { success: 'results.card.markSoldSuccess', failed: 'results.card.markSoldFailed' },
+  delisted: { success: 'results.card.markDelistedSuccess', failed: 'results.card.markDelistedFailed' },
+  unknown: { success: 'results.card.unmarkSuccess', failed: 'results.card.unmarkFailed' },
+}
+
+async function handleSetListingStatus(item: ResultItem, status: 'sold' | 'delisted' | 'unknown') {
+  const toastKey = LISTING_STATUS_TOAST[status]
   try {
     await setItemListingStatus(item, status)
     toast({
-      title: isMarkSold
-        ? t('results.card.markSoldSuccess')
-        : t('results.card.unmarkSoldSuccess'),
+      title: t(toastKey.success),
     })
   } catch (e) {
     toast({
-      title: isMarkSold ? t('results.card.markSoldFailed') : t('results.card.unmarkSoldFailed'),
+      title: t(toastKey.failed),
       description: (e as Error).message,
       variant: 'destructive',
     })

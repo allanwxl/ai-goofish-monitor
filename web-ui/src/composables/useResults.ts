@@ -235,11 +235,11 @@ export function useResults() {
   }
 
   /**
-   * 人工标记 / 撤销商品「已售」。
+   * 人工标记 / 撤销商品在售状态（已售 / 已下架）。
    *
    * 与可见性状态（_status）互不影响；成交价曲线会变，所以 insights 也要一起刷新。
    */
-  async function setItemListingStatus(item: ResultItem, status: 'sold' | 'unknown') {
+  async function setItemListingStatus(item: ResultItem, status: 'sold' | 'delisted' | 'unknown') {
     if (!selectedFile.value) return
     const itemId = item.商品信息?.商品ID
     if (!itemId) return

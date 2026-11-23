@@ -1058,7 +1058,8 @@ def test_manual_mark_sold_does_not_change_visibility(tmp_path, monkeypatch):
     assert client.get("/api/results/demo_full_data.jsonl").json()["total_items"] == 1
 
 
-def test_manual_mark_sold_rejects_invalid_status(tmp_path, monkeypatch):
+def test_manual_listing_status_rejects_invalid_status(tmp_path, monkeypatch):
+    """人工只开放「已售 / 已下架 / 撤销」，其它状态一律拒绝。"""
     monkeypatch.chdir(tmp_path)
     jsonl_dir = tmp_path / "jsonl"
     jsonl_dir.mkdir(parents=True, exist_ok=True)
@@ -1067,7 +1068,7 @@ def test_manual_mark_sold_rejects_invalid_status(tmp_path, monkeypatch):
     client = _client()
     resp = client.patch(
         "/api/results/demo_full_data.jsonl/items/1001/listing-status",
-        json={"listing_status": "delisted"},
+        json={"listing_status": "active"},
     )
     assert resp.status_code == 422
 
@@ -1109,6 +1110,92 @@ def test_manual_mark_sold_is_excluded_from_recheck_queue(tmp_path, monkeypatch):
     client.patch(
         "/api/results/demo_full_data.jsonl/items/1001/listing-status",
         json={"listing_status": "sold"},
+    )
+
+    queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20)
+    assert "1001" not in {entry["item_id"] for entry in queue}
+
+
+def test_manual_mark_delisted_sets_listing_status(tmp_path, monkeypatch):
+    """人工标记已下架：状态落库、来源记为人工、没有成交价。"""
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "delisted"},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["listing_status"] == "delisted"
+    assert payload["changed"] is True
+    assert payload["sold_price"] is None
+
+    item = client.get("/api/results/demo_full_data.jsonl").json()["items"][0]
+    assert item["_listing_status"] == "delisted"
+    assert item["_status_source"] == "manual"
+    # 标记已下架不隐藏卡片：可见性与在售状态是两套语义
+    assert item["_status"] == "active"
+
+
+def test_manual_mark_delisted_does_not_enter_sold_insights(tmp_path, monkeypatch):
+    """已下架不是成交，不能进成交价曲线。"""
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "delisted"},
+    )
+
+    insights = client.get("/api/results/demo_full_data.jsonl/insights").json()
+    assert insights["sold_summary"]["sold_count"] == 0
+    assert insights["sold_trend"] == []
+
+
+def test_manual_mark_delisted_can_be_undone(tmp_path, monkeypatch):
+    """撤销（unknown）同时能清掉已下架标记。"""
+    monkeypatch.chdir(tmp_path)
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "delisted"},
+    )
+
+    resp = client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "unknown"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["changed"] is True
+    assert resp.json()["listing_status"] == "unknown"
+
+    item = client.get("/api/results/demo_full_data.jsonl").json()["items"][0]
+    assert item["_listing_status"] == "unknown"
+
+
+def test_manual_mark_delisted_is_excluded_from_recheck_queue(tmp_path, monkeypatch):
+    """人工标记的已下架不会被自动巡检覆盖。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RECHECK_TERMINAL", "true")
+    jsonl_dir = tmp_path / "jsonl"
+    jsonl_dir.mkdir(parents=True, exist_ok=True)
+    _seed_status_records(jsonl_dir, ["1001"])
+
+    client = _client()
+    client.patch(
+        "/api/results/demo_full_data.jsonl/items/1001/listing-status",
+        json={"listing_status": "delisted"},
     )
 
     queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20)

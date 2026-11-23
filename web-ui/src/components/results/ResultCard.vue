@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import Badge from '@/components/ui/badge/Badge.vue'
-import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye, RotateCcw } from 'lucide-vue-next'
+import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye, RotateCcw, PackageX } from 'lucide-vue-next'
 import { formatDateTime } from '@/i18n'
 
 interface Props {
@@ -20,7 +20,7 @@ interface Props {
 const props = defineProps<Props>()
 const emit = defineEmits<{
   (e: 'toggle-block', item: ResultItem): void
-  (e: 'set-listing-status', item: ResultItem, status: 'sold' | 'unknown'): void
+  (e: 'set-listing-status', item: ResultItem, status: 'sold' | 'delisted' | 'unknown'): void
 }>()
 const { t } = useI18n()
 
@@ -66,6 +66,7 @@ const statusMeta = computed(() => {
 })
 const isTerminated = computed(() => listingStatus.value === 'sold' || listingStatus.value === 'delisted')
 const isSold = computed(() => listingStatus.value === 'sold')
+const isDelisted = computed(() => listingStatus.value === 'delisted')
 // 人工标记的记录：平台探测不会覆盖它，界面上要能区分出来
 const isManualStatus = computed(() => props.item._status_source === 'manual')
 const manualMarkedTitle = computed(() => {
@@ -73,7 +74,16 @@ const manualMarkedTitle = computed(() => {
   if (!checkedAt) return t('results.card.manualTag')
   return t('results.status.manualMarkedAt', { time: formatDateTime(checkedAt) })
 })
-const listingStatusAction = computed<'sold' | 'unknown'>(() => (isSold.value ? 'unknown' : 'sold'))
+// 「标记已售」「标记已下架」两个按钮：各自表示切到另一种人工状态，
+// 已经是该状态时按钮变成「撤销」（unknown），一次点击就能改回未知。
+const soldAction = computed<'sold' | 'unknown'>(() => (isSold.value ? 'unknown' : 'sold'))
+const delistedAction = computed<'delisted' | 'unknown'>(() => (isDelisted.value ? 'unknown' : 'delisted'))
+const soldActionLabel = computed(() =>
+  isSold.value ? t('results.card.unmarkSold') : t('results.card.markSold')
+)
+const delistedActionLabel = computed(() =>
+  isDelisted.value ? t('results.card.unmarkDelisted') : t('results.card.markDelisted')
+)
 const isSoldPriceEstimated = computed(
   () => listingStatus.value === 'sold' && props.item._sold_price_source === 'listing_fallback'
 )
@@ -242,7 +252,7 @@ const expanded = ref(false)
       </div>
     </CardContent>
 
-    <CardFooter class="px-4 py-3 bg-slate-50/30 border-t border-slate-100/60 flex items-center justify-between gap-2 text-[10px]">
+    <CardFooter class="px-4 py-3 bg-slate-50/30 border-t border-slate-100/60 flex flex-wrap items-center justify-between gap-2 text-[10px]">
       <div class="flex items-center gap-3 text-slate-400 min-w-0 overflow-hidden">
         <div class="flex items-center gap-1 shrink-0">
           <User class="w-3 h-3" />
@@ -253,11 +263,11 @@ const expanded = ref(false)
           <span>{{ crawlTime }}</span>
         </div>
       </div>
-      <div class="flex items-center gap-2 shrink-0">
+      <div class="flex items-center gap-1.5 shrink-0">
         <button
           type="button"
-          @click="emit('set-listing-status', props.item, listingStatusAction)"
-          :aria-label="isSold ? t('results.card.unmarkSold') : t('results.card.markSold')"
+          @click="emit('set-listing-status', props.item, soldAction)"
+          :aria-label="soldActionLabel"
           class="inline-flex items-center gap-1 rounded-full border px-2 py-1 font-semibold transition-colors"
           :class="isSold
             ? 'border-slate-300 bg-white text-slate-500 hover:border-slate-400 hover:text-slate-700'
@@ -265,7 +275,20 @@ const expanded = ref(false)
         >
           <RotateCcw v-if="isSold" class="w-3 h-3" />
           <CheckCircle2 v-else class="w-3 h-3" />
-          <span>{{ isSold ? t('results.card.unmarkSold') : t('results.card.markSold') }}</span>
+          <span>{{ soldActionLabel }}</span>
+        </button>
+        <button
+          type="button"
+          @click="emit('set-listing-status', props.item, delistedAction)"
+          :aria-label="delistedActionLabel"
+          class="inline-flex items-center gap-1 rounded-full border px-2 py-1 font-semibold transition-colors"
+          :class="isDelisted
+            ? 'border-slate-300 bg-white text-slate-500 hover:border-slate-400 hover:text-slate-700'
+            : 'border-slate-300 bg-slate-100 text-slate-600 hover:border-slate-400 hover:bg-slate-200'"
+        >
+          <RotateCcw v-if="isDelisted" class="w-3 h-3" />
+          <PackageX v-else class="w-3 h-3" />
+          <span>{{ delistedActionLabel }}</span>
         </button>
         <a :href="info.商品链接" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-primary font-bold hover:gap-1.5 transition-all">
           {{ t('results.card.detail') }} <ExternalLink class="w-3 h-3" />

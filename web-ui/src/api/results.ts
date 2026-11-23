@@ -78,15 +78,17 @@ export async function updateItemStatus(filename: string, itemId: string, status:
 }
 
 /**
- * 人工标记 / 撤销商品「已售」。
+ * 人工标记 / 撤销商品在售状态（已售 / 已下架）。
  *
  * 注意与 updateItemStatus 是两套语义：这里改的是商品在闲鱼上的**在售状态**
  * （listing_status），不改记录的可见性（active/hidden/expired）。
+ *
+ * `unknown` = 撤销人工标记（已售与已下架都算），状态回落为未知。
  */
 export async function updateItemListingStatus(
   filename: string,
   itemId: string,
-  listingStatus: 'sold' | 'unknown'
+  listingStatus: 'sold' | 'delisted' | 'unknown'
 ): Promise<{
   message: string
   listing_status: string

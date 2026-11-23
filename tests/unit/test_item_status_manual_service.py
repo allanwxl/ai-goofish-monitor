@@ -7,16 +7,19 @@ import pytest
 
 from src.infrastructure.persistence.sqlite_connection import sqlite_connection
 from src.services.item_status_manual_service import (
+    clear_manual_listing_status,
+    mark_item_delisted_manually,
     mark_item_sold_manually,
-    unmark_item_sold_manually,
 )
 from src.services.item_status_service import (
+    LISTING_STATUS_DELISTED,
     LISTING_STATUS_SOLD,
     apply_listing_status,
     build_sold_status_insights,
     parse_listing_status,
 )
 from src.services.result_storage_service import (
+    load_item_listing_snapshot,
     load_item_status_events,
     load_status_recheck_queue,
     save_result_record,
@@ -168,7 +171,7 @@ def test_mark_item_sold_manually_reports_missing_item(tmp_path, monkeypatch):
 # ── 撤销 ─────────────────────────────────────────────────────────────
 
 
-def test_unmark_item_sold_manually_resets_state_and_events(tmp_path, monkeypatch):
+def test_clear_manual_listing_status_resets_state_and_events(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _save_item("1001", price="¥950")
     _save_item("1002", price="¥1200")
@@ -181,7 +184,7 @@ def test_unmark_item_sold_manually_resets_state_and_events(tmp_path, monkeypatch
         detected_at="2026-01-02T10:00:00",
     )
 
-    result = unmark_item_sold_manually("demo_full_data.jsonl", "1001")
+    result = clear_manual_listing_status("demo_full_data.jsonl", "1001")
 
     assert result["updated"] is True
     assert result["changed"] is True
@@ -200,21 +203,21 @@ def test_unmark_item_sold_manually_resets_state_and_events(tmp_path, monkeypatch
     assert [event["item_id"] for event in events] == ["1002"]
 
 
-def test_unmark_item_sold_manually_on_non_sold_item(tmp_path, monkeypatch):
+def test_clear_manual_listing_status_on_non_sold_item(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _save_item("1001")
 
-    result = unmark_item_sold_manually("demo_full_data.jsonl", "1001")
+    result = clear_manual_listing_status("demo_full_data.jsonl", "1001")
 
     assert result["updated"] is False
     assert result["changed"] is False
-    assert result["reason"] == "not_sold"
+    assert result["reason"] == "not_marked"
 
 
-def test_unmark_item_sold_manually_reports_missing_item(tmp_path, monkeypatch):
+def test_clear_manual_listing_status_reports_missing_item(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    result = unmark_item_sold_manually("demo_full_data.jsonl", "404")
+    result = clear_manual_listing_status("demo_full_data.jsonl", "404")
 
     assert result["updated"] is False
     assert result["reason"] == "not_found"
@@ -235,7 +238,7 @@ def test_manual_sold_is_excluded_from_recheck_queue(tmp_path, monkeypatch):
     assert "1001" not in {entry["item_id"] for entry in queue}
 
     # 撤销后保护自然解除，记录重新进入可复核队列
-    unmark_item_sold_manually("demo_full_data.jsonl", "1001")
+    clear_manual_listing_status("demo_full_data.jsonl", "1001")
     queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20)
     assert "1001" in {entry["item_id"] for entry in queue}
 
@@ -277,7 +280,122 @@ def test_manual_sold_shows_up_in_sold_insights(tmp_path, monkeypatch):
     assert insights["sold_trend"][0]["estimated_count"] == 1
 
     # 撤销后这笔记账要一起消失，否则成交价曲线会重复计数
-    unmark_item_sold_manually("demo_full_data.jsonl", "1001")
+    clear_manual_listing_status("demo_full_data.jsonl", "1001")
     insights = build_sold_status_insights("demo_full_data.jsonl")
     assert insights["sold_summary"]["sold_count"] == 0
     assert insights["sold_trend"] == []
+
+
+# ── 标记已下架 ────────────────────────────────────────────────────────
+
+
+def test_mark_item_delisted_manually_sets_status_without_sold_price(tmp_path, monkeypatch):
+    """已下架 = 没卖出去：不应产生任何成交价。"""
+    monkeypatch.chdir(tmp_path)
+    _save_item("1001", price="¥950")
+
+    result = mark_item_delisted_manually(
+        "demo_full_data.jsonl", "1001", detected_at="2026-01-02T10:00:00"
+    )
+
+    assert result["updated"] is True
+    assert result["changed"] is True
+    assert result["listing_status"] == LISTING_STATUS_DELISTED
+    assert result["sold_price"] is None
+
+    row = _row("1001")
+    assert row["listing_status"] == LISTING_STATUS_DELISTED
+    assert row["sold_price"] is None
+    assert row["sold_at"] is None
+    # 人工判断没有平台状态码，不能留上一轮的原始码
+    assert row["status_raw_code"] is None
+    assert row["status_source"] == "manual"
+    assert row["status_checked_at"] == "2026-01-02T10:00:00"
+
+    # 对外口径：没有成交价，也没有成交价来源
+    snapshot = load_item_listing_snapshot("demo_full_data.jsonl", "1001")
+    assert snapshot["sold_price_display"] == ""
+    assert snapshot["sold_price_source"] == ""
+
+
+def test_mark_item_delisted_manually_clears_previous_sold_record(tmp_path, monkeypatch):
+    """从「已售」改成「已下架」：成交价与成交事件都要清掉，不留在成交价曲线里。"""
+    monkeypatch.chdir(tmp_path)
+    _save_item("1001", price="¥950")
+
+    mark_item_sold_manually("demo_full_data.jsonl", "1001")
+    assert build_sold_status_insights("demo_full_data.jsonl")["sold_summary"]["sold_count"] == 1
+
+    result = mark_item_delisted_manually("demo_full_data.jsonl", "1001")
+
+    assert result["changed"] is True
+    assert result["listing_status"] == LISTING_STATUS_DELISTED
+
+    row = _row("1001")
+    assert row["sold_price"] is None
+    assert row["sold_at"] is None
+    assert row["sold_price_source"] == ""
+
+    insights = build_sold_status_insights("demo_full_data.jsonl")
+    assert insights["sold_summary"]["sold_count"] == 0
+    assert insights["sold_trend"] == []
+
+    # 只剩下「已下架」这一条状态事件
+    events = load_item_status_events("demo_full_data.jsonl")
+    assert [event["to_status"] for event in events] == [LISTING_STATUS_DELISTED]
+
+
+def test_mark_item_delisted_manually_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _save_item("1001", price="¥950")
+
+    mark_item_delisted_manually("demo_full_data.jsonl", "1001")
+    second = mark_item_delisted_manually("demo_full_data.jsonl", "1001")
+
+    assert second["changed"] is False
+    assert second["listing_status"] == LISTING_STATUS_DELISTED
+    assert len(load_item_status_events("demo_full_data.jsonl")) == 1
+
+
+def test_mark_item_delisted_manually_reports_missing_item(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    result = mark_item_delisted_manually("demo_full_data.jsonl", "404")
+
+    assert result["updated"] is False
+    assert result["changed"] is False
+    assert result["reason"] == "not_found"
+
+
+def test_clear_manual_listing_status_clears_delisted(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _save_item("1001", price="¥950")
+
+    mark_item_delisted_manually("demo_full_data.jsonl", "1001")
+    result = clear_manual_listing_status("demo_full_data.jsonl", "1001")
+
+    assert result["updated"] is True
+    assert result["changed"] is True
+    assert result["listing_status"] == "unknown"
+
+    row = _row("1001")
+    assert row["listing_status"] == "unknown"
+    assert row["status_source"] is None
+    assert load_item_status_events("demo_full_data.jsonl") == []
+
+
+def test_manual_delisted_is_excluded_from_recheck_queue(tmp_path, monkeypatch):
+    """人工标记的已下架同样不能被平台探测结果覆盖。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ITEM_STATUS_RECHECK_TERMINAL", "true")
+    _save_item("1001", price="¥950")
+
+    mark_item_delisted_manually("demo_full_data.jsonl", "1001")
+
+    queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20)
+    assert "1001" not in {entry["item_id"] for entry in queue}
+
+    # 撤销后保护自然解除，记录重新进入可复核队列
+    clear_manual_listing_status("demo_full_data.jsonl", "1001")
+    queue = load_status_recheck_queue("demo_full_data.jsonl", limit=20)
+    assert "1001" in {entry["item_id"] for entry in queue}
