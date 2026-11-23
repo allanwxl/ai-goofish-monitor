@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import DashboardTaskSearch from '@/components/layout/DashboardTaskSearch.vue'
@@ -8,13 +8,14 @@ import {
   Zap, 
   Bell, 
   Search, 
-  UserCircle,
-  HelpCircle,
+  UserCircle, 
+  HelpCircle, 
   Menu
 } from 'lucide-vue-next'
 import Badge from '@/components/ui/badge/Badge.vue'
 import { useMobileNav } from '@/composables/useMobileNav'
 import { useI18n } from 'vue-i18n'
+import { fetchAppVersion } from '@/api/version'
 
 const router = useRouter()
 const route = useRoute()
@@ -23,6 +24,23 @@ const inactiveSearchValue = ref('')
 const { t } = useI18n()
 
 const isDashboard = computed(() => route.name === 'Dashboard')
+
+// 当前运行的版本：升级后一眼看出新版本有没有生效
+const appVersion = ref('')
+const appCommit = ref('')
+onMounted(async () => {
+  const info = await fetchAppVersion()
+  if (!info) return
+  appVersion.value = info.version
+  appCommit.value = info.commit
+})
+const versionTitle = computed(() =>
+  appCommit.value ? `${t('header.version')}: ${appVersion.value} (${appCommit.value})` : `${t('header.version')}: ${appVersion.value}`
+)
+// 版本未知时别硬加 "v" 前缀，直接显示 unknown，假装有版本号更糟
+const versionLabel = computed(() =>
+  !appVersion.value || appVersion.value === 'unknown' ? 'unknown' : `v${appVersion.value}`
+)
 
 function goAccounts() {
   router.push('/accounts')
@@ -51,8 +69,13 @@ function goPrompts() {
       <h1 class="text-lg font-black text-slate-800 tracking-tighter">
         AI <span class="text-primary">Xianyu</span> Hunter
       </h1>
-      <Badge variant="outline" class="ml-2 text-[10px] font-bold border-primary/20 text-primary bg-primary/5 uppercase tracking-widest hidden sm:flex">
-        PRO
+      <Badge
+        v-if="appVersion"
+        variant="outline"
+        class="ml-2 text-[10px] font-bold border-primary/20 text-primary bg-primary/5 tracking-wide hidden sm:flex"
+        :title="versionTitle"
+      >
+        {{ versionLabel }}
       </Badge>
     </RouterLink>
 

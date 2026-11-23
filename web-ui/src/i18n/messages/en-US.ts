@@ -65,6 +65,7 @@ const enUS = {
     openPrompts: 'Open prompt manager',
     searchUnavailable: 'Task search is only available on the dashboard...',
     accountManagement: 'Account Management',
+    version: 'Current version',
   },
   sidebar: {
     dashboard: 'Dashboard',

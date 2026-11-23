@@ -17,6 +17,7 @@ from src.api.routes import (
     login_state,
     websocket,
     accounts,
+    version,
 )
 from src.api.dependencies import (
     set_process_service,
@@ -31,6 +32,7 @@ from src.services.task_generation_service import TaskGenerationService
 from src.infrastructure.persistence.sqlite_bootstrap import bootstrap_sqlite_storage
 from src.infrastructure.persistence.sqlite_task_repository import SqliteTaskRepository
 from src.infrastructure.config.settings import settings as app_settings
+from src.infrastructure.config.version import resolve_app_version
 
 
 # 全局服务实例
@@ -98,7 +100,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="闲鱼智能监控机器人",
     description="基于AI的闲鱼商品监控系统",
-    version="2.0.0",
+    version=resolve_app_version(),
     lifespan=lifespan
 )
 
@@ -112,6 +114,7 @@ app.include_router(results.router)
 app.include_router(login_state.router)
 app.include_router(websocket.router)
 app.include_router(accounts.router)
+app.include_router(version.router)
 
 # 挂载静态文件
 # 旧的静态文件目录（用于截图等）

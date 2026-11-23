@@ -65,6 +65,7 @@ const zhCN = {
     openPrompts: '打开 Prompt 管理',
     searchUnavailable: '任务搜索仅在监控概览页可用...',
     accountManagement: '账号管理',
+    version: '当前版本',
   },
   sidebar: {
     dashboard: '监控概览',

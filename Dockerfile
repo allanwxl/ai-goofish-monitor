@@ -22,6 +22,11 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r re
 # Stage 3: Create the final, lean image
 FROM python:3.11-slim-bookworm
 
+# 版本号由构建方注入（CI 用 git describe --tags --always --dirty 算好）；
+# 镜像里没有 .git，这是运行时能拿到的唯一版本来源。
+ARG APP_VERSION=unknown
+ENV APP_VERSION=${APP_VERSION}
+
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/venv \
