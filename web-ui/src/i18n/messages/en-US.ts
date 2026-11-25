@@ -231,7 +231,7 @@ const enUS = {
       blacklisted: 'Rule Hidden',
       expired: 'Expired',
       soldPrice: 'Sold Price',
-      soldPriceEstimated: 'Sold ≈ ¥{price}',
+      soldPriceEstimatedValue: '≈ ¥{price}',
       soldPriceEstimatedHint: 'estimated from listing price',
       soldPriceSource: 'Platform sold price',
       block: 'Block',

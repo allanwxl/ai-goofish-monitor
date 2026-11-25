@@ -231,7 +231,7 @@ const zhCN = {
       blacklisted: '规则屏蔽',
       expired: '已过期',
       soldPrice: '成交价',
-      soldPriceEstimated: '成交价 ≈ ¥{price}',
+      soldPriceEstimatedValue: '≈ ¥{price}',
       soldPriceEstimatedHint: '挂牌价估算',
       soldPriceSource: '平台成交价',
       block: '屏蔽',

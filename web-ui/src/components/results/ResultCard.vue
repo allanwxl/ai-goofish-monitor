@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import Badge from '@/components/ui/badge/Badge.vue'
-import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye, RotateCcw, PackageX } from 'lucide-vue-next'
+import { ExternalLink, TrendingUp, TrendingDown, Info, User, Clock, CheckCircle2, XCircle, AlertCircle, EyeOff, Eye, RotateCcw, PackageX, Tag } from 'lucide-vue-next'
 import { formatDateTime } from '@/i18n'
 
 interface Props {
@@ -95,6 +95,20 @@ const soldPriceText = computed(() => {
     return t('results.card.soldPriceEstimated', { price: props.item._sold_price })
   }
   return props.item._sold_price_display || `¥${props.item._sold_price}`
+})
+// 成交价与「市场均价 / 历史低位」并排展示时，格子里只放数值，标签由上方标题承担
+const soldPriceValue = computed(() => {
+  if (!soldPriceText.value) return ''
+  if (isSoldPriceEstimated.value) {
+    return t('results.card.soldPriceEstimatedValue', { price: props.item._sold_price })
+  }
+  return props.item._sold_price_display || `¥${props.item._sold_price}`
+})
+const hasPriceStats = computed(() => Boolean(priceInsight?.observation_count))
+const priceStatsGridClass = computed(() => {
+  if (soldPriceText.value && hasPriceStats.value) return 'grid-cols-3'
+  if (hasPriceStats.value) return 'grid-cols-2'
+  return 'grid-cols-1'
 })
 
 const expanded = ref(false)
@@ -218,35 +232,34 @@ const expanded = ref(false)
         </button>
       </div>
 
-      <!-- Sold Price -->
-      <div v-if="soldPriceText" class="mt-4 rounded-xl border border-rose-100 bg-rose-50/70 px-3 py-2">
-        <div class="flex items-center justify-between gap-2">
-          <span class="text-[10px] font-medium uppercase tracking-wider text-rose-400">
-            {{ t('results.card.soldPrice') }}
-          </span>
-          <span class="text-sm font-bold text-rose-600">{{ soldPriceText }}</span>
+      <!-- 价格指标：成交价 / 市场均价 / 历史低位 同一排 -->
+      <div v-if="soldPriceText || hasPriceStats" class="mt-4 grid gap-3" :class="priceStatsGridClass">
+        <!-- 成交价 -->
+        <div v-if="soldPriceText" class="p-2.5 rounded-xl border border-rose-100 bg-rose-50/50">
+          <div class="flex items-center gap-1.5 text-[10px] font-medium text-rose-400 mb-1">
+            <Tag class="w-3 h-3" /> {{ t('results.card.soldPrice') }}
+          </div>
+          <div class="text-sm font-bold text-rose-600">{{ soldPriceValue }}</div>
+          <p v-if="isSoldPriceEstimated" class="mt-0.5 text-[9px] text-rose-400">
+            {{ t('results.card.soldPriceEstimatedHint') }}
+          </p>
         </div>
-        <p v-if="isSoldPriceEstimated" class="mt-1 text-[10px] text-rose-400">
-          {{ t('results.card.soldPriceEstimatedHint') }}
-        </p>
-      </div>
-
-      <!-- Price Stats Grid -->
-      <div v-if="priceInsight?.observation_count" class="mt-4 grid grid-cols-2 gap-3">
-        <div class="bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50 group/stat">
+        <!-- 市场均价 -->
+        <div v-if="hasPriceStats" class="bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
           <div class="flex items-center gap-1.5 text-[10px] font-medium text-slate-400 mb-1">
             <TrendingUp class="w-3 h-3" /> {{ t('results.card.marketAvg') }}
           </div>
           <div class="text-sm font-bold text-slate-700">
-            {{ priceInsight.market_avg_price ? `¥${priceInsight.market_avg_price}` : '—' }}
+            {{ priceInsight?.market_avg_price ? `¥${priceInsight.market_avg_price}` : '—' }}
           </div>
         </div>
-        <div class="bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
+        <!-- 历史低位 -->
+        <div v-if="hasPriceStats" class="bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
           <div class="flex items-center gap-1.5 text-[10px] font-medium text-slate-400 mb-1">
             <TrendingDown class="w-3 h-3" /> {{ t('results.card.historicalLow') }}
           </div>
           <div class="text-sm font-bold text-slate-700">
-            {{ priceInsight.min_price ? `¥${priceInsight.min_price}` : '—' }}
+            {{ priceInsight?.min_price ? `¥${priceInsight.min_price}` : '—' }}
           </div>
         </div>
       </div>
