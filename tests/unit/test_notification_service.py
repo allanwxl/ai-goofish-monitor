@@ -187,16 +187,54 @@ def test_feishu_client_sends_interactive_card_payload(monkeypatch):
     actions = [
         element
         for element in card["body"]["elements"]
-        if element.get("tag") == "action"
+        if element.get("tag") == "button"
     ]
     assert len(actions) == 1
-    buttons = actions[0]["actions"]
-    assert buttons[0]["url"] == "https://www.goofish.com/item/123"
-    assert buttons[0]["text"]["content"] == "💻 电脑端查看"
+    button = actions[0]
+    assert button["text"]["content"] == "💻 电脑端查看"
+    # 2.0 用 behaviors 的 open_url 声明跳转，不能用 1.0 的 url 字段
+    assert button["behaviors"] == [
+        {"type": "open_url", "default_url": "https://www.goofish.com/item/123"}
+    ]
+    assert "url" not in button
 
     # 未配置签名密钥时不下发签名字段
     assert "timestamp" not in payload
     assert "sign" not in payload
+
+
+def test_feishu_card_v2_avoids_schema_1_only_properties(monkeypatch):
+    """schema 2.0 对属性校验比 1.0 严格，1.0 专有属性会直接被飞书拒绝。
+
+    回归点：曾经把 2.0 外壳（schema/body）和 1.0 组件（action/note/wide_screen_mode）
+    混在一起发，卡片被拒后静默降级成纯文本。
+    """
+    captured = {}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["json"] = json
+        return _FakeFeishuResponse({"code": 0, "msg": "success"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(client.send(_product(), "价格合适"))
+
+    card = captured["json"]["card"]
+    assert card["schema"] == "2.0"
+    assert "wide_screen_mode" not in card.get("config", {})
+
+    tags = [element.get("tag") for element in card["body"]["elements"]]
+    # 2.0 不支持交互模块与备注组件
+    assert "action" not in tags
+    assert "note" not in tags
+    assert "button" in tags
+    # 2.0 没有 note 组件，页脚改用普通文本组件
+    assert "div" in tags
 
 
 def test_feishu_card_contains_extra_product_fields(monkeypatch):
@@ -277,12 +315,13 @@ def test_feishu_client_builds_alert_card_for_task_failure(monkeypatch):
     assert "原因: 任务运行失败" in body_text
 
 
-def test_feishu_client_falls_back_to_text_when_card_rejected(monkeypatch):
+def test_feishu_client_falls_back_to_legacy_card_then_text(monkeypatch):
+    """两种卡片都被拒时才降级纯文本：2.0 → 1.0 → 文本。"""
     payloads = []
 
     def _fake_post(url, json=None, headers=None, timeout=None):
         payloads.append(json)
-        if len(payloads) == 1:
+        if len(payloads) <= 2:
             return _FakeFeishuResponse({"code": 9499, "msg": "Bad Request"})
         return _FakeFeishuResponse({"code": 0, "msg": "success"})
 
@@ -295,13 +334,42 @@ def test_feishu_client_falls_back_to_text_when_card_rejected(monkeypatch):
 
     asyncio.run(client.send(_product(), "价格合适"))
 
-    assert len(payloads) == 2
+    assert len(payloads) == 3
     assert payloads[0]["msg_type"] == "interactive"
-    assert payloads[1]["msg_type"] == "text"
-    assert payloads[1]["content"]["text"].startswith("🚨 新推荐! Sony A7M4")
-    assert "价格: 9999" in payloads[1]["content"]["text"]
-    assert "原因: 价格合适" in payloads[1]["content"]["text"]
-    assert "https://www.goofish.com/item/123" in payloads[1]["content"]["text"]
+    assert payloads[0]["card"]["schema"] == "2.0"
+    assert payloads[1]["msg_type"] == "interactive"
+    assert "schema" not in payloads[1]["card"]
+    assert payloads[2]["msg_type"] == "text"
+    assert payloads[2]["content"]["text"].startswith("🚨 新推荐! Sony A7M4")
+    assert "价格: 9999" in payloads[2]["content"]["text"]
+    assert "原因: 价格合适" in payloads[2]["content"]["text"]
+    assert "https://www.goofish.com/item/123" in payloads[2]["content"]["text"]
+
+
+def test_feishu_client_falls_back_to_legacy_card_when_v2_rejected(monkeypatch):
+    """2.0 卡片被拒时，退回 1.0 卡片，保证群���里仍然是卡片而不是纯文本。"""
+    payloads = []
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        payloads.append(json)
+        if len(payloads) == 1:
+            return _FakeFeishuResponse({"code": 200861, "msg": "card json parse err"})
+        return _FakeFeishuResponse({"code": 0, "msg": "success"})
+
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    client = FeishuBotClient(
+        "https://open.feishu.cn/open-apis/bot/v2/hook/demo-token",
+        pcurl_to_mobile=False,
+    )
+
+    asyncio.run(client.send(_product(), "价格合适"))
+
+    assert len(payloads) == 2
+    legacy_card = payloads[1]["card"]
+    assert "schema" not in legacy_card
+    assert legacy_card["config"]["wide_screen_mode"] is True
+    assert any(element.get("tag") == "action" for element in legacy_card["elements"])
 
 
 def test_feishu_client_signs_payload_when_secret_configured(monkeypatch):

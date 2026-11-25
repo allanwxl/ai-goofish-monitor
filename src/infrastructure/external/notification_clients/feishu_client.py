@@ -2,8 +2,8 @@
 飞书群机器人通知客户端
 支持自定义机器人 Webhook，可选开启签名校验
 
-推送优先使用交互式卡片（schema 2.0），卡片被飞书拒绝时自动降级为纯文本，
-避免因卡片格式或机器人安全策略导致漏推。
+推送优先使用交互式卡片：先发 schema 2.0 卡片，被拒后退回 schema 1.0 卡片，
+两种卡片都被拒时才降级为纯文本，避免因卡片格式或机器人安全策略导致漏推。
 """
 import asyncio
 import base64
@@ -61,12 +61,24 @@ class FeishuBotClient(NotificationClient):
             raise RuntimeError("飞书机器人 未启用")
 
         message = self._build_message(product_data, reason)
-        try:
-            await self._post_payload(self._build_card_payload(message))
-        except FeishuApiError as card_error:
-            # 卡片被拒（关键词策略、格式不兼容等）时降级为纯文本，避免漏推
-            print(f"[飞书] 卡片消息发送失败，降级为纯文本: {card_error}")
-            await self._post_payload(self._build_text_payload(message))
+        # 卡片优先：先发 schema 2.0，再退回 schema 1.0，两种卡片都被拒才降级纯文本。
+        # 网络超时等不确定情况不重发，避免重复推送。
+        attempts = (
+            ("卡片(2.0)", self._build_card_payload(message)),
+            ("卡片(1.0)", self._build_legacy_card_payload(message)),
+        )
+        errors: List[str] = []
+        for label, payload in attempts:
+            try:
+                await self._post_payload(payload)
+                return
+            except FeishuApiError as card_error:
+                errors.append(f"{label}: {card_error}")
+                print(f"[飞书] {label} 发送失败: {card_error}")
+
+        # 卡片被拒（关键词策略、格式不兼容等）时降级为纯文本，避免漏推
+        print(f"[飞书] 卡片消息发送失败，降级为纯文本: {'；'.join(errors)}")
+        await self._post_payload(self._build_text_payload(message))
 
     async def _post_payload(self, payload: Dict) -> None:
         """向飞书 webhook 投递一次请求，失败时抛出 FeishuApiError。"""
@@ -125,13 +137,22 @@ class FeishuBotClient(NotificationClient):
     # 交互式卡片
     # ------------------------------------------------------------------
     def _build_card_payload(self, message: NotificationMessage) -> Dict:
+        """schema 2.0 卡片。
+
+        2.0 的属性校验比 1.0 严格：传入不支持的属性会直接报错。
+        下列写法都是 1.0 专有、在 2.0 会被拒：
+        - 交互模块 {"tag": "action"}：2.0 要把 button 直接放进 elements
+        - 备注组件 {"tag": "note"}：2.0 用普通文本 div + notation 字号 + grey 颜色代替
+        - config.wide_screen_mode：2.0 改用 config.width_mode
+        """
         return {
             "msg_type": "interactive",
-            "card": self._build_card(message),
+            "card": self._build_card_v2(message),
         }
 
-    def _build_card(self, message: NotificationMessage) -> Dict:
-        if self._is_alert(message):
+    def _build_card_v2(self, message: NotificationMessage) -> Dict:
+        is_alert = self._is_alert(message)
+        if is_alert:
             header = {
                 "template": CARD_TEMPLATE_ALERT,
                 "title": {
@@ -157,9 +178,106 @@ class FeishuBotClient(NotificationClient):
                 {"tag": "hr"},
                 {"tag": "markdown", "content": _reason_markdown(message.reason)},
             ]
-            actions = self._build_actions(message)
-            if actions:
-                elements.append({"tag": "action", "actions": actions})
+            elements.extend(self._build_buttons_v2(message))
+
+        elements.append(self._build_footer_v2())
+
+        return {
+            "schema": "2.0",
+            "config": {"width_mode": "fill"},
+            "header": header,
+            "body": {"elements": elements, "vertical_spacing": "8px"},
+        }
+
+    @staticmethod
+    def _build_buttons_v2(message: NotificationMessage) -> List[Dict]:
+        """2.0 按钮：直接放在 elements 中，链接用 behaviors 的 open_url 声明。"""
+        buttons: List[Dict] = []
+        if message.mobile_link and message.mobile_link != message.desktop_link:
+            buttons.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "📱 手机端查看"},
+                    "type": "primary",
+                    "width": "fill",
+                    "behaviors": [
+                        {"type": "open_url", "default_url": message.mobile_link}
+                    ],
+                }
+            )
+        buttons.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "💻 电脑端查看"},
+                "type": "default",
+                "width": "fill",
+                "behaviors": [
+                    {"type": "open_url", "default_url": message.desktop_link}
+                ],
+            }
+        )
+        return buttons
+
+    @staticmethod
+    def _build_footer_v2() -> Dict:
+        """2.0 没有 note 组件，用普通文本组件 + notation 字号 + grey 颜色代替。"""
+        return {
+            "tag": "div",
+            "text": {
+                "tag": "plain_text",
+                "content": (
+                    f"{CARD_FOOTER_TEXT} · "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                ),
+                "text_size": "notation",
+                "text_color": "grey",
+            },
+        }
+
+    def _build_legacy_card_payload(self, message: NotificationMessage) -> Dict:
+        """schema 1.0 卡片：2.0 被拒时的第二选择，老客户端兼容性更好。"""
+        return {
+            "msg_type": "interactive",
+            "card": self._build_card_v1(message),
+        }
+
+    def _build_card_v1(self, message: NotificationMessage) -> Dict:
+        if self._is_alert(message):
+            header = {
+                "template": CARD_TEMPLATE_ALERT,
+                "title": {
+                    "tag": "plain_text",
+                    "content": _truncate(f"⚠️ {message.title}", CARD_TITLE_MAX_LENGTH),
+                },
+            }
+            elements = [
+                {"tag": "div", "text": {"tag": "lark_md", "content": _reason_markdown(message.reason)}},
+            ]
+        else:
+            header = {
+                "template": CARD_TEMPLATE_RECOMMEND,
+                "title": {
+                    "tag": "plain_text",
+                    "content": _truncate(
+                        message.notification_title, CARD_TITLE_MAX_LENGTH
+                    ),
+                },
+            }
+            elements = [
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": "\n".join(self._build_info_lines(message)),
+                    },
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": _reason_markdown(message.reason)},
+                },
+                {"tag": "action", "actions": self._build_actions(message)},
+            ]
 
         elements.append(
             {
@@ -177,10 +295,9 @@ class FeishuBotClient(NotificationClient):
         )
 
         return {
-            "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "header": header,
-            "body": {"elements": elements},
+            "elements": elements,
         }
 
     @staticmethod
@@ -217,7 +334,7 @@ class FeishuBotClient(NotificationClient):
 
     @staticmethod
     def _build_actions(message: NotificationMessage) -> List[Dict]:
-        """手机端/电脑端跳转按钮。"""
+        """schema 1.0 按钮：放在交互模块 action 里，链接直接写 url。"""
         actions: List[Dict] = []
         if message.mobile_link and message.mobile_link != message.desktop_link:
             actions.append(
