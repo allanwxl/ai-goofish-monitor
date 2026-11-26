@@ -38,11 +38,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 COPY --from=builder ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
+# libatomic1 是必需的：playwright install 调用的内置 node 二进制要链接
+# libatomic.so.1，slim 镜像默认没有它，playwright install --with-deps 也不装，
+# 缺了会在装浏览器时报 exit code 127。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         tzdata \
         tini \
         libzbar0 \
+        libatomic1 \
     && playwright install --with-deps --no-shell chromium \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
